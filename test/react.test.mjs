@@ -454,10 +454,10 @@ test("a late mount lookup cannot overwrite a newer manual policy refresh", async
     await refresh;
   });
   assert.equal(value.policyStatus, "ready");
-  assert.deepEqual(
-    value.automationOptions.map((option) => option.key),
-    ["auto_verify", "fix"],
-  );
+  const refreshedPolicy = value.policy;
+  assert.equal(refreshedPolicy.identityVerified, true);
+  assert.equal(refreshedPolicy.accessLevel, "full_access");
+  assert.deepEqual(value.automationOptions, []);
 
   await act(async () => {
     pendingResponses[0](
@@ -470,10 +470,8 @@ test("a late mount lookup cannot overwrite a newer manual policy refresh", async
     await new Promise((resolve) => setImmediate(resolve));
   });
   assert.equal(value.policyStatus, "ready");
-  assert.deepEqual(
-    value.automationOptions.map((option) => option.key),
-    ["auto_verify", "fix"],
-  );
+  assert.equal(value.policy, refreshedPolicy, "the older response must not replace the refreshed policy");
+  assert.deepEqual(value.automationOptions, []);
 
   await act(async () => renderer.unmount());
 });

@@ -537,6 +537,18 @@ the typed `--handrail-bug-*` properties directly; direct values take precedence
 over `appearance.tokens`. The built-in launcher installs the same configured
 tokens on itself, so its default primary treatment matches the dialog.
 
+The email-update opt-in resets host styles within that control, including broad
+`input` and `label` rules using `!important`. Its native checkbox keeps a fixed
+size, the copy wraps beside it, and helper text uses the SDK's normal weight.
+Use appearance tokens for its font and colors; application form styles do not
+need exceptions for this control. The reset does not affect host-page controls.
+
+The opt-in browser regression suite runs with `npm run test:browser` after
+`npx playwright install chromium`. It covers broad host CSS, late-loaded
+`!important` rules, light/dark tokens, narrow screens, wrapping, and keyboard
+interaction. An existing Chromium installation can be selected with
+`PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH`.
+
 The report form and **My bug reports** view share one compact desktop dialog
 height so the shell does not resize when users switch views. In history, a
 primary **Report a bug** header action returns to the form. Active and Archived

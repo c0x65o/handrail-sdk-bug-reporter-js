@@ -110,7 +110,73 @@ export interface HandrailBugReporterButtonProps
 type UiVariables = HandrailBugReporterStyle;
 type DialogTab = "report" | "history";
 
+const NOTIFICATION_OPT_IN_SELECTOR = '[data-handrail-bug-reporter-dialog="true"] [data-handrail-bug-notification-opt-in="true"]';
+
 const RESPONSIVE_DIALOG_CSS = `
+/* Host form resets must not turn this native checkbox into a full-width field.
+   Keep the reset local, restore SDK typography, and retain native input behavior.
+   Important declarations also cover broad host rules using !important. */
+${NOTIFICATION_OPT_IN_SELECTOR},
+${NOTIFICATION_OPT_IN_SELECTOR} :is(input, span, strong) {
+  all: revert !important;
+  box-sizing: border-box !important;
+  font-family: var(--handrail-bug-font-family) !important;
+  font-size: 13px !important;
+  font-weight: 400 !important;
+  line-height: 1.4 !important;
+  color: var(--handrail-bug-text) !important;
+  text-align: start !important;
+  text-transform: none !important;
+  letter-spacing: normal !important;
+  white-space: normal !important;
+  overflow-wrap: anywhere !important;
+  cursor: pointer !important;
+}
+${NOTIFICATION_OPT_IN_SELECTOR} {
+  display: flex !important;
+  flex-flow: row nowrap !important;
+  align-items: flex-start !important;
+  gap: 9px !important;
+  width: 100% !important;
+  min-width: 0 !important;
+  margin: 0 !important;
+  padding: 0 !important;
+}
+${NOTIFICATION_OPT_IN_SELECTOR} > input {
+  appearance: auto !important;
+  -webkit-appearance: auto !important;
+  flex: 0 0 14px !important;
+  width: 14px !important;
+  min-width: 14px !important;
+  max-width: 14px !important;
+  height: 14px !important;
+  min-height: 14px !important;
+  max-height: 14px !important;
+  margin: 2px 0 0 !important;
+  padding: 0 !important;
+  accent-color: var(--handrail-bug-accent) !important;
+}
+${NOTIFICATION_OPT_IN_SELECTOR} > span {
+  display: block !important;
+  flex: 1 1 0% !important;
+  min-width: 0 !important;
+}
+${NOTIFICATION_OPT_IN_SELECTOR} strong {
+  display: block !important;
+  font-weight: 700 !important;
+}
+${NOTIFICATION_OPT_IN_SELECTOR} > span > span {
+  display: block !important;
+  margin-top: 2px !important;
+  color: var(--handrail-bug-muted-text) !important;
+  font-size: 11px !important;
+}
+${NOTIFICATION_OPT_IN_SELECTOR}::before,
+${NOTIFICATION_OPT_IN_SELECTOR}::after,
+${NOTIFICATION_OPT_IN_SELECTOR} :is(input, span, strong)::before,
+${NOTIFICATION_OPT_IN_SELECTOR} :is(input, span, strong)::after {
+  content: none !important;
+}
 [data-handrail-bug-reporter-dialog="true"] button {
   appearance: none;
   -webkit-appearance: none;
@@ -487,15 +553,6 @@ const styles: Record<string, CSSProperties> = {
     padding: "9px 20px",
     borderTop: "1px solid var(--handrail-bug-border)",
     background: "var(--handrail-bug-surface)",
-  },
-  checkboxLabel: {
-    display: "flex",
-    gap: 9,
-    alignItems: "flex-start",
-    marginTop: 10,
-    color: "inherit",
-    fontSize: 13,
-    cursor: "pointer",
   },
   button: {
     appearance: "none",
@@ -1558,9 +1615,9 @@ function BugReportForm({ onCancel }: { readonly onCancel: () => void }): ReactEl
 
         {notificationsAvailable && <fieldset style={{ ...styles.fieldset, margin: 0 }}>
           <legend style={{ padding: "0 5px", fontWeight: 700 }}>Updates</legend>
-          <label style={{ ...styles.checkboxLabel, marginTop: 0 }}>
+          <label data-handrail-bug-notification-opt-in="true">
             <input aria-label="Email me when this bug is fixed" type="checkbox" checked={reporter.form.notifyOnResolution} onChange={(event) => reporter.updateForm({ notifyOnResolution: event.target.checked })} />
-            <span><strong>Email me when this bug is fixed</strong><span style={{ display: "block", marginTop: 2, color: "var(--handrail-bug-muted-text)", fontSize: 11 }}>One email after the fix reaches this environment{notificationEligibility?.recipientHint ? `, to ${notificationEligibility.recipientHint}` : ""}.</span></span>
+            <span><strong>Email me when this bug is fixed</strong><span>One email after the fix reaches this environment{notificationEligibility?.recipientHint ? `, to ${notificationEligibility.recipientHint}` : ""}.</span></span>
           </label>
         </fieldset>}
       </aside>

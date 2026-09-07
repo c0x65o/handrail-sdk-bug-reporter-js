@@ -1,6 +1,6 @@
 {
   "name": "@handrail/bug-reporter",
-  "version": "0.4.48",
+  "version": "0.4.49",
   "description": "Browser-safe, server, headless React, and packaged React bug reporter integrations for Handrail",
   "license": "UNLICENSED",
   "type": "module",
@@ -53,6 +53,8 @@
     "test:contracts": "tsc --noEmit -p tsconfig.contracts.json",
     "pretest": "npm run build",
     "test": "node --test test/*.test.mjs",
+    "pretest:browser": "npm run build",
+    "test:browser": "node --test --test-concurrency=1 test/browser/*.test.mjs",
     "check": "npm run build && npm run typecheck && tsc --noEmit -p tsconfig.contracts.json && node --test test/*.test.mjs && npm pack --dry-run",
     "prepare": "npm run build",
     "prepublishOnly": "npm run check"
@@ -63,7 +65,9 @@
   "devDependencies": {
     "@types/react": "^19.1.9",
     "esbuild": "^0.25.8",
+    "playwright": "1.61.1",
     "react": "^19.1.1",
+    "react-dom": "19.2.8",
     "react-test-renderer": "^19.2.8",
     "tsup": "^8.5.0",
     "typescript": "^5.9.2"
