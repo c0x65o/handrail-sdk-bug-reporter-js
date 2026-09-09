@@ -3,6 +3,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
 import { chromium } from "playwright";
+import { assertReporterFormLayout } from "./reporter-form-layout.mjs";
 
 // Regression fixtures from the broad Hitcents form rules and Spartan's scoped
 // controls. No production pages, credentials, or network requests are needed.
@@ -30,7 +31,7 @@ const hostStyles = {
   `,
 };
 
-test("notification consent withstands host CSS without changing host controls", async (t) => {
+test("reporter fields and notification consent withstand host CSS without changing host controls", async (t) => {
   const bundle = await build({
     entryPoints: [fileURLToPath(new URL("./notification-opt-in.fixture.jsx", import.meta.url))],
     bundle: true,
@@ -71,8 +72,10 @@ test("notification consent withstands host CSS without changing host controls", 
               }), { themeMode });
               const checkbox = page.getByRole("checkbox", { name: "Email me when this bug is fixed" });
               await checkbox.waitFor({ state: "visible" });
+              const formBefore = await assertReporterFormLayout(page);
               // Also check styles loaded after the SDK, as in lazy-loaded routes.
               await page.addStyleTag({ content: css });
+              assert.deepEqual(await assertReporterFormLayout(page), formBefore);
 
               const layout = await checkbox.evaluate((input) => {
                 const label = input.closest("label");

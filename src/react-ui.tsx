@@ -111,8 +111,39 @@ type UiVariables = HandrailBugReporterStyle;
 type DialogTab = "report" | "history";
 
 const NOTIFICATION_OPT_IN_SELECTOR = '[data-handrail-bug-reporter-dialog="true"] [data-handrail-bug-notification-opt-in="true"]';
+const DETAIL_LABEL_SELECTOR = '[data-handrail-bug-reporter-dialog="true"] [data-handrail-bug-report-details="true"] label';
 
 const RESPONSIVE_DIALOG_CSS = `
+/* Host label grids and generated text must not become reporter form content.
+   Preserve the expanding fields' row sizing and the separate consent layout. */
+${DETAIL_LABEL_SELECTOR} {
+  display: grid !important;
+  grid-template-columns: minmax(0, 1fr) !important;
+  gap: 5px !important;
+  min-width: 0 !important;
+}
+${DETAIL_LABEL_SELECTOR},
+${DETAIL_LABEL_SELECTOR} span {
+  font-family: var(--handrail-bug-font-family) !important;
+  font-size: 13px !important;
+  font-weight: 700 !important;
+  line-height: 1.4 !important;
+  text-align: start !important;
+  text-transform: none !important;
+  letter-spacing: normal !important;
+  white-space: normal !important;
+  overflow-wrap: anywhere !important;
+}
+${DETAIL_LABEL_SELECTOR} > span > span {
+  font-size: 11px !important;
+  font-weight: 500 !important;
+}
+${DETAIL_LABEL_SELECTOR}::before,
+${DETAIL_LABEL_SELECTOR}::after,
+${DETAIL_LABEL_SELECTOR} span::before,
+${DETAIL_LABEL_SELECTOR} span::after {
+  content: none !important;
+}
 /* Host form resets must not turn this native checkbox into a full-width field.
    Keep the reset local, restore SDK typography, and retain native input behavior.
    Important declarations also cover broad host rules using !important. */
@@ -259,6 +290,10 @@ ${NOTIFICATION_OPT_IN_SELECTOR} :is(input, span, strong)::after {
   }
   [data-handrail-bug-reporter-content="report"] {
     padding: 12px 14px !important;
+  }
+  [data-handrail-bug-report-actions="true"] {
+    margin-inline: -14px !important;
+    padding-inline: 14px !important;
   }
   [data-handrail-bug-reporter-content="history"] {
     padding: 12px 14px 0 !important;
@@ -1623,7 +1658,7 @@ function BugReportForm({ onCancel }: { readonly onCancel: () => void }): ReactEl
       </aside>
     </div>
 
-    <div style={styles.formActions}>
+    <div data-handrail-bug-report-actions="true" style={styles.formActions}>
       <button type="button" onClick={onCancel} disabled={reporter.submission.status === "submitting"} style={buttonStyle("secondary")}>Cancel</button>
       <div style={{ display: "flex", justifyContent: "flex-end", gap: 9, flexWrap: "wrap" }}>
         <button type="submit" disabled={reporter.submission.status === "submitting"} style={{ ...buttonStyle("primary"), opacity: reporter.submission.status === "submitting" ? 0.65 : 1 }}>
