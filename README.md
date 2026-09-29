@@ -693,3 +693,28 @@ branch such as `main`. `npm run check` verifies package and lockfile version
 agreement, package exports, syntax, type contracts, browser safety, stamped
 metadata, and packed contents. Publishing is intentionally outside this
 repository task.
+
+### Opt-in All users history
+
+Mine remains the default. `visibility: "all"` continues to mean active plus
+personally archived reports. To request other reporters' history use
+`listBugs({ audience: "all", signal })` or
+`getBug(id, { audience: "all", signal })`. Each shared read refreshes discovery;
+`policy.allUsersHistory` is true only for a verified server opt-in. Handrail
+rechecks the current session and saved project policy on every read. Do not
+infer permission from a role, cached discovery or a report ID.
+
+The packaged history adds **Mine / All users** only when permitted. Pass a
+non-secret `sessionKey` to `HandrailBugReporterProvider` and change it on every
+sign-out, account or tenant switch. This remounts state and cancels pending
+history. Project/environment/API changes also reset the provider. Headless
+callers must abort and discard retained data on those same transitions. Never
+put a session token in `sessionKey`.
+
+Shared records expose titles, status, severity and dates within one Handrail
+project/environment and current Known Users source. They exclude screenshots,
+private context and internal execution journeys. `is_owner === false` means
+read-only; archive/restore and notification authority remain owner-only. This
+project-wide opt-in is not a substitute for application subtenant isolation.
+Keep it OFF when multiple subtenants share one identity source and must remain
+private. Vanilla submission and old Mine-only integrations are unchanged.

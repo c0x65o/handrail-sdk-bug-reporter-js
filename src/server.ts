@@ -512,12 +512,14 @@ export function createSameOriginBugReporterHandler<
         "status_group",
         "sort",
         "visibility",
+        "audience",
       ]) {
         const value = incomingUrl.searchParams.get(key);
         if (value) endpoint.searchParams.set(key, value);
       }
     }
 
+    if (isLookup && incomingUrl.searchParams.get("audience") === "all") endpoint.searchParams.set("audience", "all");
     let upstream: Response | null = null;
     let applicationSessionForwarded = false;
     for (let attempt = 0; attempt < attempts; attempt += 1) {

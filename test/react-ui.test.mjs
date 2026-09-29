@@ -894,3 +894,20 @@ test("My bugs refreshes every 15 seconds while the history tab stays open", asyn
     await act(async () => renderer.unmount());
   }
 });
+
+test('packaged Mine/All users control needs verified opt-in and shared rows have no mutations', async () => {
+  let allowed = true;
+  const fetch = async url => String(url).includes('/policy')
+    ? jsonResponse({ ...reporterPolicy, history: { all_users: allowed } })
+    : jsonResponse({ contract_version: 'v1', bugs: String(url).includes('audience=all') ? [{ ...trackedBug('shared'), is_owner: false }] : [], pagination: { limit: 20, has_more: false, next_cursor: null } });
+  let renderer;
+  await act(async () => { renderer = create(renderInsideProvider(createElement(HandrailBugReporterDialog, { open: true, onClose() {} }), { config: config(fetch), loadPolicyOnMount: true, sessionKey: 'alice' })); });
+  await act(async () => new Promise(resolve => setTimeout(resolve, 10)));
+  await act(async () => renderer.root.findByProps({ 'data-handrail-bug-view-switch': 'history' }).props.onClick());
+  const all = renderer.root.findAllByType('button').find(button => button.children.join('') === 'All users');
+  assert.ok(all); await act(async () => { all.props.onClick(); await new Promise(resolve => setTimeout(resolve, 10)); });
+  assert.equal(renderer.root.findAllByProps({ 'aria-label': 'Archive Bug shared' }).length, 0);
+  assert.equal(renderer.root.findAllByProps({ 'aria-label': 'View Bug shared' }).length, 1);
+  allowed = false;
+  await act(async () => { renderer.unmount(); });
+});

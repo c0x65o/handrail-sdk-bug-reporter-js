@@ -475,3 +475,22 @@ test("a late mount lookup cannot overwrite a newer manual policy refresh", async
 
   await act(async () => renderer.unmount());
 });
+
+test('sessionKey cancels inflight history and clears policy/results on account switch', async () => {
+  let value, release, signal;
+  const config = {
+    apiBaseUrl: '/api/mobile-bug-reports', transport: 'same-origin', projectId: 'project-123', environment: 'staging',
+    fetch: async (_url, init) => { signal = init.signal; await new Promise(resolve => { release = resolve; });
+      return jsonResponse({ contract_version: 'v1', bugs: [trackedBug('alice-private')], pagination: { limit: 20, has_more: false, next_cursor: null } }); },
+  };
+  let renderer;
+  const props = { config, loadPolicyOnMount: false, onValue: next => { value = next; } };
+  await act(async () => { renderer = create(createElement(Harness, { ...props, sessionKey: 'alice' })); });
+  let pending;
+  await act(async () => { pending = value.refreshBugs().catch(() => null); });
+  await act(async () => { renderer.update(createElement(Harness, { ...props, sessionKey: 'bob' })); });
+  assert.equal(signal.aborted, true); assert.deepEqual(value.tracking.bugs, []); assert.equal(value.policy, null);
+  await act(async () => { release(); await pending; });
+  assert.deepEqual(value.tracking.bugs, []);
+  await act(async () => renderer.unmount());
+});

@@ -1059,7 +1059,7 @@ function BugHistoryRow({
     </div>
     <div role="cell" data-handrail-bug-history-cell="action" style={{ display: "flex", justifyContent: "flex-end", gap: 6 }}>
       <button type="button" aria-expanded={expanded} aria-label={`View ${bug.title}`} onClick={() => onToggle(bug.id)} style={styles.historyActionButton}>{expanded ? "Hide" : "View"}</button>
-      <button
+      {bug.is_owner !== false && <button
         type="button"
         disabled={busy}
         aria-label={`${bug.archived ? "Restore" : "Archive"} ${bug.title}`}
@@ -1073,7 +1073,7 @@ function BugHistoryRow({
         }}
       >
         {busy ? "Updating…" : bug.archived ? "Restore" : "Archive"}
-      </button>
+      </button>}
     </div>
     {expanded && <div role="cell" data-handrail-bug-history-detail="true" style={{ display: "contents" }}><BugResolutionReceipt bug={bug} /></div>}
   </article>;
@@ -1082,6 +1082,9 @@ function BugHistoryRow({
 function BugHistory(): ReactElement {
   const reporter = useHandrailBugReporter();
   const [search, setSearch] = useState(() => reporter.tracking.query?.search || "");
+  const [audience, setAudience] = useState<"mine" | "all">("mine");
+  const allUsersAllowed = reporter.policy?.allUsersHistory === true;
+  useEffect(() => { if (!allUsersAllowed) setAudience("mine"); }, [allUsersAllowed]);
   const [statusGroup, setStatusGroup] = useState<BugTrackingStatusGroup | "">(
     () => reporter.tracking.query?.statusGroup || "",
   );
@@ -1105,6 +1108,7 @@ function BugHistory(): ReactElement {
   const query = (
     overrides: Partial<BugReporterTrackingQueryOptions> = {},
   ): BugReporterTrackingQueryOptions => ({
+    audience,
     search: search.trim() || undefined,
     statusGroup: statusGroup || undefined,
     visibility,
@@ -1126,6 +1130,7 @@ function BugHistory(): ReactElement {
   useEffect(() => {
     const refreshBugs = reporter.refreshBugs;
     const currentQuery: BugReporterTrackingQueryOptions = {
+      audience,
       search: search.trim() || undefined,
       statusGroup: statusGroup || undefined,
       visibility,
@@ -1141,7 +1146,7 @@ function BugHistory(): ReactElement {
       });
     }, HISTORY_REFRESH_INTERVAL_MS);
     return () => clearInterval(interval);
-  }, [reporter.refreshBugs, search, sort, statusGroup, visibility]);
+  }, [reporter.refreshBugs, audience, search, sort, statusGroup, visibility]);
 
   const changeArchive = async (bugId: string, archived: boolean) => {
     setBusyBugId(bugId);
@@ -1195,7 +1200,7 @@ function BugHistory(): ReactElement {
     }, 300);
   };
 
-  return <section aria-label="My bug reports" aria-busy={reporter.tracking.status === "loading"} data-handrail-bug-history="true" style={{ display: "flex", width: "100%", minHeight: 0, flex: "1 1 auto", flexDirection: "column", gap: 8, boxSizing: "border-box" }}>
+  return <section aria-label={audience === "all" ? "All users’ bug reports" : "My bug reports"} aria-busy={reporter.tracking.status === "loading"} data-handrail-bug-history="true" style={{ display: "flex", width: "100%", minHeight: 0, flex: "1 1 auto", flexDirection: "column", gap: 8, boxSizing: "border-box" }}>
     <form
       data-handrail-bug-history-toolbar="true"
       style={{ ...styles.historyControls, width: "100%" }}
@@ -1204,6 +1209,10 @@ function BugHistory(): ReactElement {
         void refresh();
       }}
     >
+      <div role="group" aria-label="Bug history reporters">
+        <button type="button" aria-pressed={audience === "mine"} onClick={() => { setAudience("mine"); void refresh({ audience: "mine" }); }} style={{ ...styles.tab, ...(audience === "mine" ? styles.selectedControl : {}) }}>Mine</button>
+        {allUsersAllowed && <button type="button" aria-pressed={audience === "all"} onClick={() => { setAudience("all"); void refresh({ audience: "all" }); }} style={{ ...styles.tab, ...(audience === "all" ? styles.selectedControl : {}) }}>All users</button>}
+      </div>
       <div role="tablist" aria-label="Bug history visibility" style={{ display: "flex", flex: "0 0 auto", gap: 2, padding: 2, borderRadius: 8, background: "var(--handrail-bug-surface-muted)" }}>
         {(["active", "archived"] as const).map((option) => <button
           key={option}
@@ -1223,7 +1232,7 @@ function BugHistory(): ReactElement {
         >{option[0].toUpperCase() + option.slice(1)}</button>)}
       </div>
       <input
-        aria-label="Search my bugs"
+        aria-label={audience === "all" ? "Search all users’ bugs" : "Search my bugs"}
         autoComplete="off"
         maxLength={200}
         type="search"
@@ -1710,7 +1719,7 @@ export function HandrailBugReporterDialog({
     }
     if (
       policyRefreshAttemptedForOpenRef.current
-      || reporter.policyStatus !== "unavailable"
+      || !["ready", "unavailable"].includes(reporter.policyStatus)
     ) return;
     policyRefreshAttemptedForOpenRef.current = true;
     void reporter.refreshPolicy().catch(() => undefined);
@@ -1786,7 +1795,7 @@ export function HandrailBugReporterDialog({
   const variables = appearanceVariables(appearance);
   const historyCount = reporter.tracking.summary?.total
     ?? (reporter.tracking.status === "ready" ? reporter.tracking.bugs.length : null);
-  const dialogHeading = tab === "history" ? "My bug reports" : heading;
+  const dialogHeading = tab === "history" ? (reporter.policy?.allUsersHistory ? "Bug reports" : "My bug reports") : heading;
   const dialogDescription = tab === "history"
     ? "Scan current status, progress, impact, and the next step for every report."
     : "Describe the issue and review the attached context before sending.";

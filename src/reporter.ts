@@ -73,6 +73,7 @@ export interface BugReporterPolicy {
   readonly projectId: string;
   readonly environment: string;
   readonly identityVerified: true;
+  readonly allUsersHistory?: boolean;
   readonly accessLevel: ReporterAccessLevel;
   /** Canonical shared role on newer servers; accessLevel remains for compatibility. */
   readonly role?: KnownUserAutomationRole | null;
@@ -287,6 +288,7 @@ export interface BugResolutionJourney {
 }
 
 export interface TrackedBugRecord {
+  readonly is_owner?: boolean;
   readonly id: string;
   readonly title: string;
   readonly severity: string;
@@ -327,6 +329,7 @@ export interface BugTrackingSummary {
 }
 
 export interface BugTrackingQuery {
+  readonly audience?: "mine" | "all";
   readonly search: string | null;
   readonly statusGroup: BugTrackingStatusGroup | null;
   readonly sort: BugTrackingSort;
@@ -350,6 +353,7 @@ export interface BugTrackingPage {
 }
 
 export interface BugTrackingListOptions {
+  readonly audience?: "mine" | "all";
   /** Defaults to 20 and is capped by Handrail at 50. */
   readonly limit?: number;
   /** Opaque keyset cursor returned by the previous page. */
@@ -1120,6 +1124,7 @@ function trackedBugRecord(input: unknown): TrackedBugRecord | null {
       updated_at: nullableString(rollup.updated_at),
     }),
     resolution_journey: bugResolutionJourney(record.resolution_journey),
+    is_owner: record.is_owner !== false,
     reported_app_version: nullableString(record.reported_app_version),
     reported_route: nullableString(record.reported_route),
     reported_app_flavor: nullableString(record.reported_app_flavor),
@@ -1189,6 +1194,7 @@ function trackingQuery(input: unknown): BugTrackingQuery | null {
   if (!visibility || !BUG_TRACKING_VISIBILITY_SET.has(visibility)) return null;
   return Object.freeze({
     search,
+    ...(record.audience === "all" ? { audience: "all" as const } : {}),
     statusGroup: rawStatusGroup as BugTrackingStatusGroup | null,
     sort,
     visibility,
@@ -1673,6 +1679,10 @@ export class HandrailBugReporterClient {
         "Bug reporting is not configured.",
       );
     }
+    const sessionBefore = options.audience === "all" ? await this.freshSessionToken() : null;
+    if (options.audience === "all" && (await this.discoverPolicy(options.signal))?.allUsersHistory !== true) {
+      throw new BugReporterError("tracking_rejected", "All users history is unavailable.");
+    }
     const search = normalizedTrackingSearch(options.search);
     const statusGroup = options.statusGroup ?? null;
     if (statusGroup && !BUG_TRACKING_STATUS_GROUP_SET.has(statusGroup)) {
@@ -1691,6 +1701,7 @@ export class HandrailBugReporterClient {
       environment: this.environment,
       limit: options.limit,
       cursor: options.cursor,
+      audience: options.audience,
       search,
       status_group: statusGroup,
       sort,
@@ -1704,19 +1715,27 @@ export class HandrailBugReporterClient {
         "Bug history returned an invalid response.",
       );
     }
+    if (options.signal?.aborted || (options.audience === "all" && this.transport === "direct" && sessionBefore !== await this.freshSessionToken())) {
+      this.#policy = null;
+      throw new BugReporterError("tracking_rejected", "History session changed.");
+    }
     return page;
   }
 
-  /** Read one bug only when it belongs to the current verified reporter. */
+  /** Read an owned bug, or explicitly request freshly authorized shared history. */
   async getBug(
     bugId: string,
-    options: { readonly signal?: AbortSignal } = {},
+    options: { readonly audience?: "mine" | "all"; readonly signal?: AbortSignal } = {},
   ): Promise<TrackedBugRecord> {
     if (this.configuration.status !== "ready" || !this.endpoints) {
       throw new BugReporterError(
         "invalid_configuration",
         "Bug reporting is not configured.",
       );
+    }
+    const sessionBefore = options.audience === "all" ? await this.freshSessionToken() : null;
+    if (options.audience === "all" && (await this.discoverPolicy(options.signal))?.allUsersHistory !== true) {
+      throw new BugReporterError("tracking_rejected", "All users history is unavailable.");
     }
     const normalizedBugId = cleanString(bugId);
     if (!normalizedBugId) {
@@ -1730,6 +1749,7 @@ export class HandrailBugReporterClient {
       {
         project_id: this.projectId,
         environment: this.environment,
+        audience: options.audience,
       },
     );
     const body = plainRecord(await this.trackingRequest(url, options.signal));
@@ -1741,6 +1761,10 @@ export class HandrailBugReporterClient {
         "tracking_rejected",
         "Bug history returned an invalid response.",
       );
+    }
+    if (options.signal?.aborted || (options.audience === "all" && this.transport === "direct" && sessionBefore !== await this.freshSessionToken())) {
+      this.#policy = null;
+      throw new BugReporterError("tracking_rejected", "History session changed.");
     }
     return bug;
   }
@@ -2039,6 +2063,7 @@ export class HandrailBugReporterClient {
       projectId: this.projectId!,
       environment: this.environment!,
       identityVerified: true,
+      allUsersHistory: plainRecord(body.history)?.all_users === true,
       accessLevel,
       role,
       askOptions,
@@ -2122,6 +2147,10 @@ export class HandrailBugReporterClient {
         });
       } catch {
         lastResponse = null;
+      }
+      if (input.signal?.aborted) {
+        this.#policy = null;
+        return Object.freeze({ response: null, sensitiveValues: [] });
       }
       if (
         lastResponse &&

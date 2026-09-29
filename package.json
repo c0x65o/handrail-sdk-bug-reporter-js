@@ -1,6 +1,6 @@
 {
   "name": "@handrail/bug-reporter",
-  "version": "0.4.50",
+  "version": "0.5.0",
   "description": "Browser-safe, server, headless React, and packaged React bug reporter integrations for Handrail",
   "license": "UNLICENSED",
   "type": "module",

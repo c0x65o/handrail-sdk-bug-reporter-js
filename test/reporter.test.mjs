@@ -1088,3 +1088,26 @@ test("HTTP rejections accept Handrail's current string error shape", async () =>
       error.requestId === "body-correlation-id",
   );
 });
+
+test('All users requires fresh verified opt-in for each read, and drops a switched session', async () => {
+  let allowed = false, session = 'alice', listCalls = 0, release;
+  const reporter = createBugReporter(reporterConfig({
+    applicationSessionTokenProvider: () => session,
+    fetch: async (url) => {
+      if (String(url).includes('/policy')) return jsonResponse({ ...validPolicy, history: { all_users: allowed } });
+      listCalls++;
+      assert.equal(new URL(url).searchParams.get('audience'), 'all');
+      if (release === 'wait') await new Promise(resolve => { release = resolve; });
+      return jsonResponse({ contract_version: 'v1', bugs: [trackedBug({ is_owner: false })], pagination: { limit: 20, has_more: false, next_cursor: null } });
+    },
+  }));
+  await assert.rejects(reporter.listBugs({ audience: 'all' })); assert.equal(listCalls, 0);
+  allowed = true;
+  assert.equal((await reporter.listBugs({ audience: 'all' })).bugs[0].is_owner, false);
+  allowed = false; await assert.rejects(reporter.listBugs({ audience: 'all' })); assert.equal(listCalls, 1);
+  allowed = true; release = 'wait';
+  const pending = reporter.listBugs({ audience: 'all' });
+  while (typeof release !== 'function') await new Promise(resolve => setTimeout(resolve, 1));
+  session = 'bob'; release(); await assert.rejects(pending, /session changed/);
+  assert.equal(reporter.currentPolicy, null);
+});

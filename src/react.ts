@@ -198,7 +198,7 @@ export interface BugReporterTrackingState {
 
 export type BugReporterTrackingQueryOptions = Pick<
   BugTrackingListOptions,
-  "search" | "statusGroup" | "sort" | "visibility"
+  "audience" | "search" | "statusGroup" | "sort" | "visibility"
 >;
 
 export interface HandrailBugReporterContextValue {
@@ -240,6 +240,8 @@ export interface HandrailBugReporterProviderProps extends PropsWithChildren {
   readonly loadPolicyOnMount?: boolean;
   /** Number of bugs requested per keyset page. Defaults to 20; maximum 50. */
   readonly historyPageSize?: number;
+  /** Non-secret account/session revision. Change on sign-out, account or tenant switch. */
+  readonly sessionKey?: string | number;
 }
 
 const EMPTY_SUBMISSION: BugReporterSubmissionState = Object.freeze({
@@ -291,7 +293,11 @@ const HandrailBugReporterContext =
  * Renderless controller for policy, form, screenshot, and submission state.
  * It registers no global listeners and reads or writes no browser storage.
  */
-export function HandrailBugReporterProvider({
+export function HandrailBugReporterProvider(props: HandrailBugReporterProviderProps): ReactElement {
+  return createElement(BugReporterSessionProvider, { ...props, key: `${props.sessionKey ?? ""}:${props.config.projectId}:${props.config.environment}:${props.config.apiBaseUrl}` });
+}
+
+function BugReporterSessionProvider({
   children,
   config,
   initialForm,
@@ -311,6 +317,8 @@ export function HandrailBugReporterProvider({
     useState<BugReporterTrackingState>(EMPTY_TRACKING);
   const policyDiscoveryGeneration = useRef(0);
   const trackingGeneration = useRef(0);
+  const trackingAbort = useRef<AbortController | null>(null);
+  useEffect(() => () => { trackingGeneration.current += 1; trackingAbort.current?.abort(); }, []);
   const previousReporterRef = useRef(reporter);
 
   useEffect(() => {
@@ -489,14 +497,19 @@ export function HandrailBugReporterProvider({
   const refreshBugs = useCallback(async (
     options: BugReporterTrackingQueryOptions = {},
   ) => {
+    trackingAbort.current?.abort();
+    const controller = new AbortController();
+    trackingAbort.current = controller;
     const generation = ++trackingGeneration.current;
-    setTracking((current) => ({ ...current, status: "loading", error: null }));
+    setTracking((current) => ({ ...current, bugs: [], summary: null, status: "loading", error: null }));
     try {
       const page = await reporter.listBugs({
         limit: historyPageSize,
         ...options,
+        signal: controller.signal,
       });
       if (generation === trackingGeneration.current) {
+        if (options.audience === "all") applyPolicy(reporter.currentPolicy);
         setTracking({
           status: "ready",
           stale: false,
@@ -517,8 +530,9 @@ export function HandrailBugReporterProvider({
             "Bug history could not be loaded. Please try again.",
           );
       if (generation === trackingGeneration.current) {
-        setTracking((current) => ({
-          ...current,
+        applyPolicy(null);
+        setTracking(() => ({
+          ...EMPTY_TRACKING,
           status: "error",
           stale: true,
           error: safeError,
@@ -526,18 +540,23 @@ export function HandrailBugReporterProvider({
       }
       throw safeError;
     }
-  }, [historyPageSize, reporter]);
+  }, [applyPolicy, historyPageSize, reporter]);
 
   const loadMoreBugs = useCallback(async () => {
     if (!tracking.hasMore || !tracking.nextCursor || tracking.status === "loading") {
       return null;
     }
+    trackingAbort.current?.abort();
+    const controller = new AbortController();
+    trackingAbort.current = controller;
     const generation = ++trackingGeneration.current;
     setTracking((current) => ({ ...current, status: "loading", error: null }));
     try {
       const page = await reporter.listBugs({
         limit: historyPageSize,
         cursor: tracking.nextCursor,
+        audience: tracking.query?.audience,
+        signal: controller.signal,
       });
       if (generation === trackingGeneration.current) {
         setTracking((current) => ({
@@ -565,8 +584,9 @@ export function HandrailBugReporterProvider({
             "Bug history could not be loaded. Please try again.",
           );
       if (generation === trackingGeneration.current) {
-        setTracking((current) => ({
-          ...current,
+        applyPolicy(null);
+        setTracking(() => ({
+          ...EMPTY_TRACKING,
           status: "error",
           stale: true,
           error: safeError,
@@ -574,11 +594,12 @@ export function HandrailBugReporterProvider({
       }
       throw safeError;
     }
-  }, [historyPageSize, reporter, tracking.hasMore, tracking.nextCursor, tracking.status]);
+  }, [applyPolicy, historyPageSize, reporter, tracking.hasMore, tracking.nextCursor, tracking.status, tracking.query]);
 
   const refreshCurrentBugs = useCallback(async () => {
     const query = tracking.query;
     return refreshBugs(query ? {
+      audience: query.audience,
       search: query.search || undefined,
       statusGroup: query.statusGroup || undefined,
       sort: query.sort,
