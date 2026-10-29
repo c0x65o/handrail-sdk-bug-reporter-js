@@ -976,7 +976,7 @@ function BugResolutionProgress({ bug }: { readonly bug: TrackedBugRecord }): Rea
         </span>
         <strong style={{ display: "block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 10, lineHeight: 1.25 }}>{milestone.label}</strong>
         <span style={{ display: "block", marginTop: 2, color: milestone.state === "upcoming" ? "var(--handrail-bug-muted-text)" : tone.color, fontSize: 9, lineHeight: 1.2 }}>
-          {milestone.state === "current" ? "In progress" : milestone.state === "stopped" ? "Paused" : milestone.duration_ms === null ? "" : bugDuration(milestone.duration_ms)}
+          {milestone.state === "current" ? "In progress" : milestone.state === "stopped" ? journey.outcome === "closed" ? "Stopped" : "Paused" : milestone.duration_ms === null ? "" : bugDuration(milestone.duration_ms)}
         </span>
       </li>;
     })}
@@ -1007,13 +1007,13 @@ function BugResolutionReceipt({ bug }: { readonly bug: TrackedBugRecord }): Reac
       </div>}
       {facts.length > 0
         ? <ul style={{ display: "grid", gap: 5, margin: 0, padding: 0, listStyle: "none", color: "var(--handrail-bug-muted-text)", fontSize: 11 }}>{facts.map((fact) => <li key={fact}><span aria-hidden="true" style={{ marginRight: 7, color: completedTone, fontWeight: 900 }}>✓</span>{fact}</li>)}</ul>
-        : <p style={{ margin: 0, color: "var(--handrail-bug-muted-text)", fontSize: 11 }}>Handrail will add verification, safety, and release receipts as this report progresses.</p>}
+        : <p style={{ margin: 0, color: "var(--handrail-bug-muted-text)", fontSize: 11 }}>{journey.outcome === "closed" ? "This report is closed. No further automated work is planned." : "Handrail will add verification, safety, and release receipts as this report progresses."}</p>}
     </div>
     <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 8, padding: 10, border: "1px solid var(--handrail-bug-border)", borderRadius: 9, background: "var(--handrail-bug-surface)", fontSize: 10 }}>
       <span><strong style={{ display: "block", color: "var(--handrail-bug-muted-text)" }}>Total time</strong><b style={{ fontSize: 14 }}>{bugDuration(journey.total_duration_ms)}</b></span>
-      <span><strong style={{ display: "block", color: "var(--handrail-bug-muted-text)" }}>Handling</strong><b>{journey.handling === "automatic" ? "Automatic" : journey.handling === "team_review" ? "Team review" : "Policy managed"}</b></span>
+      <span><strong style={{ display: "block", color: "var(--handrail-bug-muted-text)" }}>Handling</strong><b>{journey.outcome === "closed" ? "Closed" : journey.handling === "automatic" ? "Automatic" : journey.handling === "team_review" ? "Team review" : "Policy managed"}</b></span>
       <span><strong style={{ display: "block", color: "var(--handrail-bug-muted-text)" }}>Environment</strong><b>{journey.release_environment || bug.environment}</b></span>
-      <span><strong style={{ display: "block", color: "var(--handrail-bug-muted-text)" }}>Released version</strong><b>{journey.released_version || journey.fixed_version || "Pending"}</b></span>
+      <span><strong style={{ display: "block", color: "var(--handrail-bug-muted-text)" }}>Released version</strong><b>{journey.released_version || journey.fixed_version || (journey.outcome === "closed" ? "None recorded" : "Pending")}</b></span>
       <span style={{ gridColumn: "1 / -1" }}><strong style={{ display: "block", color: "var(--handrail-bug-muted-text)" }}>Reference</strong><b>{bug.id}</b></span>
     </div>
   </section>;
@@ -1050,7 +1050,7 @@ function BugHistoryRow({
     <div role="cell" data-handrail-bug-history-cell="secondary" style={{ minWidth: 0, color: "var(--handrail-bug-muted-text)", fontSize: 11 }}>
       <span style={{ display: "flex", alignItems: "center", gap: 7 }}><span aria-hidden="true" style={{ width: 7, height: 7, flex: "0 0 7px", borderRadius: 999, background: severityColor(bug.severity) }} />{bugSeverityLabel(bug.severity)}</span>
       {journey.handling === "automatic" && <strong style={{ display: "block", marginTop: 5, color: "var(--handrail-bug-success-text)", fontSize: 9 }}>Handled automatically</strong>}
-      {journey.handling === "team_review" && <strong style={{ display: "block", marginTop: 5, color: "var(--handrail-bug-warning-text)", fontSize: 9 }}>Team review</strong>}
+      {journey.outcome !== "closed" && journey.handling === "team_review" && <strong style={{ display: "block", marginTop: 5, color: "var(--handrail-bug-warning-text)", fontSize: 9 }}>Team review</strong>}
     </div>
     <div role="cell" data-handrail-bug-history-cell="status" style={{ display: "grid", gap: 5, minWidth: 0 }}>
       <span title={bugDate(bug.last_reported_at)} style={{ color: "var(--handrail-bug-muted-text)", fontSize: 10 }}>{bugRelativeAge(bug.last_reported_at)}</span>

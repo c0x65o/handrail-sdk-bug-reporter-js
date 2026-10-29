@@ -613,6 +613,36 @@ test("the packaged form hides notification consent without a Known User email", 
   await act(async () => renderer.unmount());
 });
 
+test("closed report receipts do not promise a pending fix or release", async () => {
+  const base = trackedBug("cancelled");
+  const journey = readOnlyDiagnosisJourney();
+  const bug = { ...base, status: "closed", status_group: "closed",
+    status_rollup: { ...base.status_rollup, stage: "closed", terminal: true, label: "Closed — not actionable" },
+    resolution_journey: { ...journey, headline: "Closed — not actionable", outcome: "closed", next_step: null,
+      verification_label: null, automatic_fix_authorized: false, automatic_delivery_authorized: false,
+      fixed_version: null, released_version: null,
+      milestones: journey.milestones.map(m => ({ ...m, state: m.key === "reported" ? "complete" : "stopped" })) } };
+  let renderer;
+  await act(async () => {
+    renderer = create(createElement(HandrailBugReporterProvider,
+      { config: config(async () => jsonResponse({ contract_version: "v1", bugs: [bug],
+        summary: { total: 1, needs_attention: 0, in_progress: 0, closed: 1, not_reproduced: 0 },
+        query: { search: null, status_group: null, sort: "newest", visibility: "active" },
+        pagination: { limit: 20, filtered_count: 1, has_more: false, next_cursor: null } })), loadPolicyOnMount: false },
+      createElement(HandrailBugReporterDialog, { open: true, onClose: () => undefined })));
+  });
+  await act(async () => new Promise(resolve => setTimeout(resolve, 20)));
+  await act(async () => renderer.root.findByProps({ "data-handrail-bug-view-switch": "history" }).props.onClick());
+  await act(async () => renderer.root.findByProps({ "aria-label": "View Bug cancelled" }).props.onClick());
+  const text = renderedText(renderer.root);
+  assert.match(text, /Closed — not actionable/);
+  assert.match(text, /Stopped/);
+  assert.match(text, /No further automated work is planned/);
+  assert.match(text, /None recorded/);
+  assert.doesNotMatch(text, /Paused|Pending|Team review|as this report progresses/);
+  await act(async () => renderer.unmount());
+});
+
 test("My bugs uses the provider history, filters, and individual archive and restore actions", async () => {
   const requests = [];
   let archived = false;
