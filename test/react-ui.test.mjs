@@ -851,7 +851,10 @@ test("a submitted bug marks loaded tracking stale and refreshes it when My bugs 
 
 test("My bugs refreshes every 15 seconds while the history tab stays open", async () => {
   let listCalls = 0;
+  let releasePoll;
+  let holdPoll = false;
   const fetch = async () => {
+    if (holdPoll) await new Promise((resolve) => { releasePoll = resolve; });
     listCalls += 1;
     const bug = trackedBug(`poll-${listCalls}`);
     return jsonResponse({
@@ -909,13 +912,21 @@ test("My bugs refreshes every 15 seconds while the history tab stays open", asyn
     assert.equal(typeof intervalCallback, "function");
     const callsBeforePoll = listCalls;
 
-    await act(async () => {
-      intervalCallback();
-      await new Promise((resolve) => setTimeout(resolve, 0));
-    });
+    holdPoll = true;
+    await act(async () => { intervalCallback(); });
+    assert.equal(renderer.root.findAllByProps({ "aria-label": `View Bug poll-${listCalls}` }).length, 1,
+      "background refresh must keep the current row mounted");
+    await act(async () => { releasePoll(); });
+    holdPoll = false;
 
     assert.equal(listCalls, callsBeforePoll + 1);
     assert.equal(renderer.root.findAllByProps({ "aria-label": `View Bug poll-${listCalls}` }).length, 1);
+    const view = renderer.root.findByProps({ "aria-label": `View Bug poll-${listCalls}` });
+    await act(async () => view.props.onClick());
+    const callsWhileReading = listCalls;
+    await act(async () => { intervalCallback(); });
+    assert.equal(listCalls, callsWhileReading, "polling pauses while reading a request");
+    assert.equal(renderer.root.findByProps({ "aria-label": `View Bug poll-${listCalls}` }).props["aria-expanded"], true);
     await act(async () => renderer.root.findByProps({ "data-handrail-bug-view-switch": "report" }).props.onClick());
     assert.equal(intervalCleared, true);
   } finally {

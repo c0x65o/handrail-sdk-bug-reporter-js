@@ -1100,6 +1100,8 @@ function BugHistory(): ReactElement {
   const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const trackingStatusRef = useRef(reporter.tracking.status);
   trackingStatusRef.current = reporter.tracking.status;
+  const readingHistoryRef = useRef(false);
+  readingHistoryRef.current = expandedBugId !== null;
 
   useEffect(() => () => {
     if (searchTimerRef.current !== null) clearTimeout(searchTimerRef.current);
@@ -1137,9 +1139,9 @@ function BugHistory(): ReactElement {
       sort,
     };
     const interval = setInterval(() => {
-      if (trackingStatusRef.current === "loading") return;
+      if (trackingStatusRef.current === "loading" || readingHistoryRef.current) return;
       setHistoryActionError(null);
-      void refreshBugs(currentQuery).catch((error) => {
+      void refreshBugs(currentQuery, true).catch((error) => {
         setHistoryActionError(
           error instanceof Error ? error.message : "Bug history could not be loaded.",
         );

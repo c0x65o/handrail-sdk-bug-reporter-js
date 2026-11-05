@@ -224,6 +224,7 @@ export interface HandrailBugReporterContextValue {
   readonly tracking: BugReporterTrackingState;
   refreshBugs(
     options?: BugReporterTrackingQueryOptions,
+    background?: boolean,
   ): Promise<BugTrackingPage>;
   /** Revalidate the last server-normalized query, or the default query before first load. */
   refreshCurrentBugs(): Promise<BugTrackingPage>;
@@ -496,12 +497,13 @@ function BugReporterSessionProvider({
 
   const refreshBugs = useCallback(async (
     options: BugReporterTrackingQueryOptions = {},
+    background = false,
   ) => {
     trackingAbort.current?.abort();
     const controller = new AbortController();
     trackingAbort.current = controller;
     const generation = ++trackingGeneration.current;
-    setTracking((current) => ({ ...current, bugs: [], summary: null, status: "loading", error: null }));
+    setTracking((current) => ({ ...current, ...(background ? {} : { bugs: [], summary: null }), status: "loading", error: null }));
     try {
       const page = await reporter.listBugs({
         limit: historyPageSize,
