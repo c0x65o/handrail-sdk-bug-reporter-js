@@ -416,6 +416,36 @@ submission time, so a new report of the same canonical bug automatically makes
 it active again. The packaged tracker offers individual **Archive** and
 **Restore** actions and deliberately provides no bulk clear action.
 
+### Answer the team's questions
+
+When Handrail's analysis finds that a report's premise conflicts with the
+product's current behavior, it may ask the reporter one question. The owned
+history row (from `listBugs` or `getBug`) then carries `information_request`:
+`current_behavior` (what the product does today, or `null`), `question`, and
+zero or two to four `options`. The reporter can always write their own answer.
+While the question is open the row keeps the existing `needs_attention` group
+with the headline **Needs your input**. Older servers, shared All users rows,
+and malformed projections yield `null` without invalidating the row.
+
+```ts
+const request = bug.information_request;
+if (request) {
+  const result = await reporter.answerInformationRequest(bug.id, request.id, {
+    option: request.options[0], // optional: one of request.options
+    answer: "I tried from the artist profile.", // optional: up to 4000 characters
+  });
+  console.log(result.replayed, result.analysisResumed);
+}
+```
+
+Send `option`, `answer`, or both. The answer restarts Handrail's analysis, and
+an exact retry resolves with `replayed: true`. Rejections are `BugReporterError`
+values whose `upstreamCode` is `information_request_answer_invalid`,
+`information_request_not_found`, `information_request_already_answered`, or
+`information_request_closed`. The same-origin handler forwards only `POST
+/bugs/:bugId/information-requests/:requestId/answer`, keeps only `option` and
+`answer`, and preserves those codes.
+
 `status_rollup.stage` is one of `submitted`, `verifying`, `verified`, `fixing`,
 `fixed`, `deployed`, `closed`, `not_reproduced`, `wont_fix`, or
 `needs_attention`. The rollup uses Handrail's canonical verification, fix, and
@@ -512,6 +542,12 @@ opening the tab revalidates that query so the accepted report appears without a
 page refresh or unrelated filter change. While **My bugs** remains open, the
 packaged UI refreshes its current query every 15 seconds so server-side progress
 changes appear without reopening the tab.
+When a report has an open question, its row shows a **Needs your input** card
+without being expanded: what the product does today, the question, lettered
+single-select suggestions, an **Or write your own answer** field, and **Send
+answer**. It replaces the read-only Next step box for that report. Background
+refresh pauses while an answer has unsent input, and history refreshes after the
+answer is sent.
 
 `appearance.themeMode` accepts `auto`, `light`, or `dark`. `auto` is the
 default and follows the host color scheme while supplying a polished,
@@ -607,6 +643,7 @@ function BugReportForm() {
   // bugReport.tracking / refreshBugs({ search, statusGroup, sort, visibility })
   // bugReport.refreshCurrentBugs / loadMoreBugs
   // bugReport.archiveBug / restoreBug / archiveClosedBugs
+  // bugReport.answerInformationRequest(bugId, requestId, { option, answer })
   return null;
 }
 

@@ -952,3 +952,296 @@ test('packaged Mine/All users control needs verified opt-in and shared rows have
   allowed = false;
   await act(async () => { renderer.unmount(); });
 });
+
+function questionBug(id, request) {
+  const base = trackedBug(id);
+  const journey = readOnlyDiagnosisJourney();
+  return {
+    ...base,
+    status: "needs_attention",
+    status_group: "needs_attention",
+    status_rollup: {
+      ...base.status_rollup,
+      stage: "needs_attention",
+      label: "Needs your input",
+      raw_status: "needs_attention",
+    },
+    resolution_journey: {
+      ...journey,
+      headline: "Needs your input",
+      next_step: {
+        kind: "owner_decision",
+        label: "Answer the team's question",
+        summary: request?.question || "Answer the question.",
+      },
+    },
+    information_request: request,
+  };
+}
+
+function artistQuestion(overrides = {}) {
+  return {
+    id: "rfi-1",
+    current_behavior: "Artists can already be assigned from the event's Lineup tab.",
+    question: "Where were you trying to assign the artist?",
+    options: ["From the event's Lineup tab", "From the artist's profile", "Somewhere else"],
+    allows_written_answer: true,
+    asked_at: "2026-11-18T15:00:00.000Z",
+    response_allowed: true,
+    ...overrides,
+  };
+}
+
+function questionHistoryPage(bugs) {
+  return {
+    contract_version: "v1",
+    bugs,
+    summary: { total: bugs.length, needs_attention: bugs.length, in_progress: 0, closed: 0, not_reproduced: 0 },
+    query: { search: null, status_group: null, sort: "newest", visibility: "active" },
+    pagination: { limit: 20, filtered_count: bugs.length, has_more: false, next_cursor: null },
+  };
+}
+
+async function openQuestionHistory(fetch, beforeHistory = () => undefined) {
+  let renderer;
+  await act(async () => {
+    renderer = create(createElement(
+      HandrailBugReporterProvider,
+      { config: config(fetch), loadPolicyOnMount: false },
+      createElement(HandrailBugReporterDialog, { open: true, onClose: () => undefined }),
+    ));
+  });
+  await act(async () => new Promise((resolve) => setTimeout(resolve, 20)));
+  beforeHistory();
+  await act(async () => {
+    renderer.root.findByProps({ "data-handrail-bug-view-switch": "history" }).props.onClick();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  return renderer;
+}
+
+function sendAnswerButton(renderer) {
+  return renderer.root.findByProps({ "data-handrail-bug-information-request": "true" })
+    .findAllByType("button")
+    .find((button) => button.props.type === "submit");
+}
+
+test("an open information request shows an answer card that replaces the read-only next step", async () => {
+  const requests = [];
+  let answered = false;
+  const fetch = async (url, init) => {
+    requests.push({ url: String(url), method: init.method, body: init.body });
+    if (init.method === "POST") {
+      answered = true;
+      return jsonResponse({
+        contract_version: "v1",
+        bug_id: "bug-rfi",
+        information_request_id: "rfi-1",
+        answered: true,
+        replayed: false,
+        analysis_resumed: true,
+      });
+    }
+    return jsonResponse(questionHistoryPage([
+      answered
+        ? { ...questionBug("bug-rfi", null), resolution_journey: readOnlyDiagnosisJourney() }
+        : questionBug("bug-rfi", artistQuestion()),
+    ]));
+  };
+  const renderer = await openQuestionHistory(fetch);
+
+  // Visible on the row without expanding it.
+  assert.equal(renderer.root.findByProps({ "aria-label": "View Bug bug-rfi" }).props["aria-expanded"], false);
+  const cards = renderer.root.findAllByProps({ "data-handrail-bug-information-request": "true" });
+  assert.equal(cards.length, 1);
+  const cardText = renderedText(cards[0]);
+  assert.match(cardText, /Needs your input/);
+  assert.match(cardText, /What it does today/);
+  assert.match(cardText, /already be assigned from the event's Lineup tab/);
+  assert.match(cardText, /Where were you trying to assign the artist\?/);
+  assert.match(cardText, /Or write your own answer/);
+  const options = renderer.root.findAll((node) => node.type === "button" && node.props["data-handrail-bug-information-option"]);
+  assert.deepEqual(options.map((node) => node.props["data-handrail-bug-information-option"]), ["A", "B", "C"]);
+  assert.deepEqual(options.map((node) => node.props["aria-label"]), [
+    "A. From the event's Lineup tab",
+    "B. From the artist's profile",
+    "C. Somewhere else",
+  ]);
+  assert.ok(options.every((node) => node.props["aria-pressed"] === false));
+  assert.equal(sendAnswerButton(renderer).props.disabled, true);
+
+  // The read-only Next step box is replaced for this record.
+  await act(async () => renderer.root.findByProps({ "aria-label": "View Bug bug-rfi" }).props.onClick());
+  assert.equal(renderer.root.findAllByProps({ "data-handrail-bug-resolution-receipt": "true" }).length, 1);
+  assert.equal(renderer.root.findAllByProps({ "data-handrail-bug-next-step": "true" }).length, 0);
+  await act(async () => renderer.root.findByProps({ "aria-label": "View Bug bug-rfi" }).props.onClick());
+
+  // Single-select choices: choosing B replaces A, choosing B again clears it.
+  const option = (letter) => renderer.root.find((node) => node.type === "button" && node.props["data-handrail-bug-information-option"] === letter);
+  await act(async () => option("A").props.onClick());
+  await act(async () => option("B").props.onClick());
+  assert.equal(option("A").props["aria-pressed"], false);
+  assert.equal(option("B").props["aria-pressed"], true);
+  assert.equal(option("B").props.style.color, "var(--handrail-bug-accent)");
+  assert.equal(sendAnswerButton(renderer).props.disabled, false);
+  await act(async () => option("B").props.onClick());
+  assert.equal(sendAnswerButton(renderer).props.disabled, true);
+
+  // Whitespace is not an answer; real text enables sending.
+  const textarea = () => renderer.root.findByProps({ "data-handrail-bug-information-answer": "true" });
+  assert.equal(textarea().props.maxLength, 4000);
+  await act(async () => textarea().props.onChange({ target: { value: "   " } }));
+  assert.equal(sendAnswerButton(renderer).props.disabled, true);
+  await act(async () => textarea().props.onChange({ target: { value: "I was on the artist profile on my phone." } }));
+  await act(async () => option("B").props.onClick());
+  assert.equal(sendAnswerButton(renderer).props.disabled, false);
+
+  await act(async () => {
+    renderer.root.findByProps({ "data-handrail-bug-information-request": "true" }).props.onSubmit({ preventDefault() {} });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  const post = requests.find((request) => request.method === "POST");
+  assert.match(post.url, /\/bugs\/bug-rfi\/information-requests\/rfi-1\/answer\?project_id=project-123&environment=staging/);
+  assert.deepEqual(JSON.parse(post.body), {
+    option: "From the artist's profile",
+    answer: "I was on the artist profile on my phone.",
+  });
+  assert.equal(requests.at(-1).method, "GET", "history refreshes after a successful answer");
+  assert.equal(renderer.root.findAllByProps({ "data-handrail-bug-information-request": "true" }).length, 0);
+  assert.equal(renderer.root.findAllByProps({ "aria-label": "View Bug bug-rfi" }).length, 1, "the refresh keeps the row mounted");
+  assert.match(
+    renderedText(renderer.root.findAll((node) => node.props.role === "status" && node.props["aria-live"] === "polite").at(-1)),
+    /reviewing the report again/,
+  );
+  await act(async () => renderer.unmount());
+});
+
+test("answer card shows busy and inline server errors, and closed questions refresh history", async () => {
+  const requests = [];
+  let releaseAnswer;
+  let answerResponse;
+  let questionOpen = true;
+  const fetch = async (url, init) => {
+    requests.push({ url: String(url), method: init.method });
+    if (init.method === "POST") {
+      await new Promise((resolve) => { releaseAnswer = resolve; });
+      return answerResponse();
+    }
+    return jsonResponse(questionHistoryPage([
+      questionBug("bug-rfi", questionOpen ? artistQuestion({ options: [], current_behavior: null }) : null),
+    ]));
+  };
+  const renderer = await openQuestionHistory(fetch);
+  const card = () => renderer.root.findByProps({ "data-handrail-bug-information-request": "true" });
+  assert.doesNotMatch(renderedText(card()), /What it does today/);
+  assert.match(renderedText(card()), /Your answer/);
+  assert.equal(renderer.root.findAll((node) => node.props["data-handrail-bug-information-option"]).length, 0);
+
+  const textarea = () => renderer.root.findByProps({ "data-handrail-bug-information-answer": "true" });
+  await act(async () => textarea().props.onChange({ target: { value: "It fails on the Lineup tab." } }));
+
+  answerResponse = () => jsonResponse({ error: "Answer is too long", code: "information_request_answer_invalid" }, 400);
+  await act(async () => { card().props.onSubmit({ preventDefault() {} }); });
+  assert.equal(sendAnswerButton(renderer).children.join(""), "Sending…");
+  assert.equal(sendAnswerButton(renderer).props.disabled, true);
+  assert.equal(textarea().props.disabled, true);
+  await act(async () => {
+    releaseAnswer();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  const inlineError = card().findByProps({ role: "alert" });
+  assert.match(renderedText(inlineError), /Choose one of the answers or write your own/);
+  assert.equal(textarea().props.value, "It fails on the Lineup tab.", "the draft survives a rejected answer");
+  assert.equal(sendAnswerButton(renderer).children.join(""), "Send answer");
+  assert.equal(sendAnswerButton(renderer).props.disabled, false);
+
+  const getsBeforeConflict = requests.filter((request) => request.method === "GET").length;
+  answerResponse = () => {
+    questionOpen = false;
+    return jsonResponse({ error: "Already answered", code: "information_request_already_answered" }, 409);
+  };
+  await act(async () => { card().props.onSubmit({ preventDefault() {} }); });
+  await act(async () => {
+    releaseAnswer();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  });
+  assert.equal(requests.filter((request) => request.method === "GET").length, getsBeforeConflict + 1);
+  assert.equal(renderer.root.findAllByProps({ "data-handrail-bug-information-request": "true" }).length, 0);
+  assert.ok(renderer.root.findAllByProps({ role: "alert" }).some((node) => /already answered/.test(renderedText(node))));
+  await act(async () => renderer.unmount());
+});
+
+test("background history refresh pauses while an answer has unsent input and keeps the draft", async () => {
+  let listCalls = 0;
+  let secondAnswered = false;
+  const fetch = async (_url, init) => {
+    if (init.method === "POST") {
+      secondAnswered = true;
+      return jsonResponse({
+        contract_version: "v1",
+        bug_id: "bug-other",
+        information_request_id: "rfi-other",
+        answered: true,
+        replayed: false,
+        analysis_resumed: true,
+      });
+    }
+    listCalls += 1;
+    return jsonResponse(questionHistoryPage([
+      questionBug("bug-rfi", artistQuestion()),
+      questionBug("bug-other", secondAnswered ? null : artistQuestion({ id: "rfi-other" })),
+    ]));
+  };
+  const originalSetInterval = globalThis.setInterval;
+  const originalClearInterval = globalThis.clearInterval;
+  let intervalCallback;
+  let renderer;
+  try {
+    // Capture the history polling interval instead of scheduling a real one.
+    renderer = await openQuestionHistory(fetch, () => {
+      globalThis.setInterval = (callback) => {
+        intervalCallback = callback;
+        return 15_000;
+      };
+      globalThis.clearInterval = () => undefined;
+    });
+    assert.equal(typeof intervalCallback, "function");
+    const cards = () => renderer.root.findAllByProps({ "data-handrail-bug-information-request": "true" });
+    const option = (letter) => cards()[0].find((node) => node.type === "button" && node.props["data-handrail-bug-information-option"] === letter);
+    const textarea = () => cards()[0].findByProps({ "data-handrail-bug-information-answer": "true" });
+    assert.equal(cards().length, 2);
+
+    await act(async () => textarea().props.onChange({ target: { value: "Half-typed answer" } }));
+    await act(async () => option("C").props.onClick());
+    const callsWithDraft = listCalls;
+    await act(async () => { intervalCallback(); await new Promise((resolve) => setTimeout(resolve, 0)); });
+    assert.equal(listCalls, callsWithDraft, "polling pauses while an answer has unsent input");
+    assert.equal(textarea().props.value, "Half-typed answer");
+
+    await act(async () => textarea().props.onChange({ target: { value: "" } }));
+    await act(async () => option("C").props.onClick());
+    await act(async () => { intervalCallback(); await new Promise((resolve) => setTimeout(resolve, 0)); });
+    assert.equal(listCalls, callsWithDraft + 1, "polling resumes once the draft is empty");
+    assert.equal(cards().length, 2);
+
+    // Drafts are keyed by information request id: answering another bug
+    // replaces every row object but keeps this half-typed answer.
+    await act(async () => textarea().props.onChange({ target: { value: "Kept across refresh" } }));
+    await act(async () => option("A").props.onClick());
+    const otherTextarea = cards()[1].findByProps({ "data-handrail-bug-information-answer": "true" });
+    await act(async () => otherTextarea.props.onChange({ target: { value: "Other answer" } }));
+    const callsBeforeAnswer = listCalls;
+    await act(async () => {
+      cards()[1].props.onSubmit({ preventDefault() {} });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    assert.equal(listCalls, callsBeforeAnswer + 1);
+    assert.equal(cards().length, 1);
+    assert.equal(textarea().props.value, "Kept across refresh");
+    assert.equal(option("A").props["aria-pressed"], true);
+  } finally {
+    globalThis.setInterval = originalSetInterval;
+    globalThis.clearInterval = originalClearInterval;
+    await act(async () => renderer?.unmount());
+  }
+});

@@ -8,6 +8,10 @@ import {
   type HandrailBugSeverity,
   type BugArchiveClosedResult,
   type BugArchiveResult,
+  type BugInformationRequest,
+  type BugInformationRequestAnswerInput,
+  type BugInformationRequestAnswerResult,
+  MAX_INFORMATION_REQUEST_ANSWER_CHARACTERS,
   type BugTrackingPage,
   type BugTrackingQuery,
   type BugTrackingStatusGroup,
@@ -75,6 +79,9 @@ const currentHistoryRefresh: Promise<BugTrackingPage> =
   headlessReporter.refreshCurrentBugs();
 void trackingIsStale;
 void currentHistoryRefresh;
+const headlessAnswer: Promise<BugInformationRequestAnswerResult> =
+  headlessReporter.answerInformationRequest("bug-123", "rfi-1", { option: "A" });
+void headlessAnswer;
 
 const packagedAppearance: HandrailBugReporterAppearance = {
   themeMode: "auto",
@@ -184,6 +191,18 @@ void trackedBugPromise;
 void archivePromise;
 void restorePromise;
 void archiveClosedPromise;
+const answerInput: BugInformationRequestAnswerInput = { option: "A", answer: "Written" };
+const answerPromise: Promise<BugInformationRequestAnswerResult> =
+  reporter.answerInformationRequest("bug-123", "rfi-1", answerInput);
+const openQuestionPromise: Promise<BugInformationRequest | null | undefined> =
+  trackedBugPromise.then((bug) => bug.information_request);
+const resumed: Promise<boolean | null> = answerPromise.then((result) => result.analysisResumed);
+const answerLimit: number = MAX_INFORMATION_REQUEST_ANSWER_CHARACTERS;
+void openQuestionPromise;
+void resumed;
+void answerLimit;
+// @ts-expect-error Suggested options are read-only.
+openQuestionPromise.then((question) => question?.options.push("E"));
 void queryPromise;
 void summaryPromise;
 

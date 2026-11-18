@@ -11,6 +11,7 @@ export const BUG_REPORT_TOKEN_HEADER = "x-handrail-bug-report-token" as const;
 export const MAX_SCREENSHOT_BYTES = 20 * 1024 * 1024;
 export const REDACTED_VALUE = "[REDACTED]" as const;
 export const MAX_BUG_HISTORY_SEARCH_CHARACTERS = 200;
+export const MAX_INFORMATION_REQUEST_ANSWER_CHARACTERS = 4000;
 
 export const BUG_TRACKING_STATUS_GROUPS = Object.freeze([
   "needs_attention",
@@ -287,6 +288,40 @@ export interface BugResolutionJourney {
   readonly milestones: readonly BugResolutionMilestone[];
 }
 
+/**
+ * One open question Handrail asks the reporter when its analysis finds the
+ * report's premise conflicts with the product's current behavior.
+ */
+export interface BugInformationRequest {
+  readonly id: string;
+  /** What the product does today, when Handrail can state it. */
+  readonly current_behavior: string | null;
+  readonly question: string;
+  /** Zero, or two through four, suggested answers. */
+  readonly options: readonly string[];
+  readonly allows_written_answer: boolean;
+  readonly asked_at: string | null;
+  readonly response_allowed: true;
+}
+
+export interface BugInformationRequestAnswerInput {
+  /** One of the request's `options`, exactly as returned. */
+  readonly option?: string;
+  /** The reporter's own answer, up to 4000 characters. */
+  readonly answer?: string;
+}
+
+export interface BugInformationRequestAnswerResult {
+  readonly contract_version: "v1";
+  readonly bugId: string;
+  readonly informationRequestId: string;
+  readonly answered: true;
+  /** True when Handrail recognized an exact retry of an earlier answer. */
+  readonly replayed: boolean;
+  /** Whether the analysis restarted, or null when Handrail did not say. */
+  readonly analysisResumed: boolean | null;
+}
+
 export interface TrackedBugRecord {
   readonly is_owner?: boolean;
   readonly id: string;
@@ -300,6 +335,11 @@ export interface TrackedBugRecord {
   readonly status_rollup: BugTrackingStatusRollup;
   /** Customer-safe lifecycle projection. Null against older Handrail servers. */
   readonly resolution_journey?: BugResolutionJourney | null;
+  /**
+   * An open question for this reporter. Null when none is open, for shared
+   * rows, against older Handrail servers, or when the projection is malformed.
+   */
+  readonly information_request?: BugInformationRequest | null;
   /** Metadata from this reporter's latest submission for the canonical bug. */
   readonly reported_app_version: string | null;
   readonly reported_route: string | null;
@@ -1062,6 +1102,36 @@ function bugResolutionJourney(input: unknown): BugResolutionJourney | null {
   });
 }
 
+/**
+ * Optional projection: any unexpected shape yields null so the surrounding
+ * history record and page remain valid.
+ */
+function bugInformationRequest(input: unknown): BugInformationRequest | null {
+  const record = plainRecord(input);
+  if (!record || record.response_allowed !== true) return null;
+  const id = nullableString(record.id);
+  const question = nullableString(record.question);
+  if (!id || !question || !Array.isArray(record.options)) return null;
+  const options: string[] = [];
+  for (const value of record.options) {
+    const option = nullableString(value);
+    if (!option || options.includes(option)) return null;
+    options.push(option);
+  }
+  if (options.length === 1 || options.length > 4) return null;
+  const allowsWrittenAnswer = record.allows_written_answer === true;
+  if (!allowsWrittenAnswer && options.length === 0) return null;
+  return Object.freeze({
+    id,
+    current_behavior: nullableString(record.current_behavior),
+    question,
+    options: Object.freeze(options),
+    allows_written_answer: allowsWrittenAnswer,
+    asked_at: nullableString(record.asked_at),
+    response_allowed: true,
+  });
+}
+
 function trackedBugRecord(input: unknown): TrackedBugRecord | null {
   const record = plainRecord(input);
   const rollup = plainRecord(record?.status_rollup);
@@ -1124,6 +1194,10 @@ function trackedBugRecord(input: unknown): TrackedBugRecord | null {
       updated_at: nullableString(rollup.updated_at),
     }),
     resolution_journey: bugResolutionJourney(record.resolution_journey),
+    // Shared rows are read-only; only the reporter may answer their own question.
+    information_request: record.is_owner === false
+      ? null
+      : bugInformationRequest(record.information_request),
     is_owner: record.is_owner !== false,
     reported_app_version: nullableString(record.reported_app_version),
     reported_route: nullableString(record.reported_route),
@@ -1276,6 +1350,38 @@ function bugArchiveClosedResult(input: unknown): BugArchiveClosedResult | null {
     contract_version: "v1",
     archivedCount,
   });
+}
+
+function informationRequestAnswerResult(
+  input: unknown,
+): BugInformationRequestAnswerResult | null {
+  const record = plainRecord(input);
+  const bugId = nullableString(record?.bug_id);
+  const requestId = nullableString(record?.information_request_id);
+  const analysisResumed = record?.analysis_resumed ?? null;
+  if (
+    record?.contract_version !== "v1"
+    || !bugId
+    || !requestId
+    || record.answered !== true
+    || typeof record.replayed !== "boolean"
+    || (analysisResumed !== null && typeof analysisResumed !== "boolean")
+  ) return null;
+  return Object.freeze({
+    contract_version: "v1",
+    bugId,
+    informationRequestId: requestId,
+    answered: true,
+    replayed: record.replayed,
+    analysisResumed: analysisResumed as boolean | null,
+  });
+}
+
+function invalidInformationRequestAnswer(): BugReporterError {
+  return new BugReporterError(
+    "invalid_report",
+    "Choose an answer or write one up to 4000 characters.",
+  );
 }
 
 function urlWithQuery(
@@ -1806,6 +1912,90 @@ export class HandrailBugReporterClient {
       throw new BugReporterError(
         "tracking_rejected",
         "Bug history returned an invalid response.",
+      );
+    }
+    return result;
+  }
+
+  /**
+   * Answer the open information request on one of the reporter's own bugs.
+   * Send a suggested `option`, a written `answer`, or both. An exact retry is
+   * safe and resolves with `replayed: true`.
+   */
+  async answerInformationRequest(
+    bugId: string,
+    requestId: string,
+    input: BugInformationRequestAnswerInput,
+    options: { readonly signal?: AbortSignal } = {},
+  ): Promise<BugInformationRequestAnswerResult> {
+    if (this.configuration.status !== "ready" || !this.endpoints) {
+      throw new BugReporterError(
+        "invalid_configuration",
+        "Bug reporting is not configured.",
+      );
+    }
+    const normalizedBugId = cleanString(bugId);
+    const normalizedRequestId = cleanString(requestId);
+    const option = input?.option === undefined ? null : cleanString(input.option);
+    const answer = input?.answer === undefined ? null : cleanString(input.answer);
+    if (
+      !normalizedBugId
+      || !normalizedRequestId
+      || (input?.option !== undefined && !option)
+      || (input?.answer !== undefined && typeof input.answer !== "string")
+      || (!option && !answer)
+      || (answer && answer.length > MAX_INFORMATION_REQUEST_ANSWER_CHARACTERS)
+    ) {
+      throw invalidInformationRequestAnswer();
+    }
+    const url = urlWithQuery(
+      `${this.endpoints.bugs}/${encodeURIComponent(normalizedBugId)}/information-requests/${encodeURIComponent(normalizedRequestId)}/answer`,
+      { project_id: this.projectId, environment: this.environment },
+    );
+    const body = JSON.stringify({
+      ...(option ? { option } : {}),
+      ...(answer ? { answer } : {}),
+    });
+    const request = await this.requestWithRetries(url, {
+      method: "POST",
+      signal: options.signal,
+      vanillaBody: body,
+      automationBody: body,
+    });
+    if (!request.response) {
+      throw new BugReporterError(
+        "request_failed",
+        "Your answer could not be sent. Please try again.",
+      );
+    }
+    if (!request.response.ok) {
+      const upstream = await parseUpstreamError(
+        request.response,
+        request.sensitiveValues,
+      );
+      throw new BugReporterError(
+        "submission_rejected",
+        "Your answer was not accepted.",
+        request.response.status,
+        upstream,
+      );
+    }
+    let response: unknown = null;
+    try {
+      response = await request.response.json();
+    } catch {
+      response = null;
+    }
+    const result = informationRequestAnswerResult(response);
+    if (
+      !result
+      || result.bugId !== normalizedBugId
+      || result.informationRequestId !== normalizedRequestId
+    ) {
+      throw new BugReporterError(
+        "submission_rejected",
+        "Your answer returned an invalid response.",
+        request.response.status,
       );
     }
     return result;

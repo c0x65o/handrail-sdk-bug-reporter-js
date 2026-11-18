@@ -1111,3 +1111,191 @@ test('All users requires fresh verified opt-in for each read, and drops a switch
   session = 'bob'; release(); await assert.rejects(pending, /session changed/);
   assert.equal(reporter.currentPolicy, null);
 });
+
+function informationRequest(overrides = {}) {
+  return {
+    id: "rfi-1",
+    current_behavior: "Artists can already be assigned from the event's Lineup tab.",
+    question: "Where were you trying to assign the artist?",
+    options: ["From the event's Lineup tab", "From the artist's profile"],
+    allows_written_answer: true,
+    asked_at: "2026-11-18T15:00:00.000Z",
+    response_allowed: true,
+    ...overrides,
+  };
+}
+
+function historyPage(bugs) {
+  return {
+    contract_version: "v1",
+    bugs,
+    summary: { total: bugs.length, needs_attention: 0, in_progress: bugs.length, closed: 0, not_reproduced: 0 },
+    query: { search: null, status_group: null, sort: "newest", visibility: "active" },
+    pagination: { limit: 20, filtered_count: bugs.length, has_more: false, next_cursor: null },
+  };
+}
+
+test("history parses an open information request and keeps records valid when it is missing or malformed", async () => {
+  const malformed = [
+    "not an object",
+    [informationRequest()],
+    informationRequest({ id: "" }),
+    informationRequest({ question: 42 }),
+    informationRequest({ options: "A" }),
+    informationRequest({ options: ["Only one"] }),
+    informationRequest({ options: ["A", "B", "C", "D", "E"] }),
+    informationRequest({ options: ["A", 7] }),
+    informationRequest({ options: ["A", "A"] }),
+    informationRequest({ response_allowed: false }),
+    informationRequest({ options: [], allows_written_answer: false }),
+  ];
+  const bugs = [
+    trackedBug({ id: "bug-open", information_request: informationRequest() }),
+    trackedBug({ id: "bug-older-server" }),
+    trackedBug({ id: "bug-null", information_request: null }),
+    trackedBug({ id: "bug-shared", is_owner: false, information_request: informationRequest() }),
+    trackedBug({ id: "bug-write-in", information_request: informationRequest({ options: [], current_behavior: null }) }),
+    ...malformed.map((value, index) => trackedBug({ id: `bug-malformed-${index}`, information_request: value })),
+  ];
+  const reporter = createBugReporter(reporterConfig({
+    fetch: async () => jsonResponse(historyPage(bugs)),
+  }));
+
+  const page = await reporter.listBugs();
+  assert.equal(page.bugs.length, bugs.length);
+  const open = page.bugs[0].information_request;
+  assert.deepEqual(open, informationRequest());
+  assert.ok(Object.isFrozen(open));
+  assert.ok(Object.isFrozen(open.options));
+  assert.equal(page.bugs[1].information_request, null);
+  assert.equal(page.bugs[2].information_request, null);
+  assert.equal(page.bugs[3].information_request, null, "shared rows are never answerable");
+  assert.deepEqual(page.bugs[4].information_request.options, []);
+  assert.equal(page.bugs[4].information_request.current_behavior, null);
+  for (const bug of page.bugs.slice(5)) {
+    assert.equal(bug.information_request, null, bug.id);
+  }
+});
+
+test("reporters answer an information request with the scoped route, body, and session headers", async () => {
+  const calls = [];
+  const reporter = createBugReporter(reporterConfig({
+    applicationSessionTokenProvider: () => "answer-session",
+    fetch: async (url, init) => {
+      calls.push({ url: String(url), init });
+      return jsonResponse({
+        contract_version: "v1",
+        bug_id: "bug/123",
+        information_request_id: "rfi 1",
+        answered: true,
+        replayed: calls.length > 1,
+        analysis_resumed: calls.length > 1 ? null : true,
+      });
+    },
+  }));
+
+  const first = await reporter.answerInformationRequest("bug/123", "rfi 1", {
+    option: "From the event's Lineup tab",
+    answer: "  I used the Lineup tab on mobile.  ",
+  });
+  assert.deepEqual(first, {
+    contract_version: "v1",
+    bugId: "bug/123",
+    informationRequestId: "rfi 1",
+    answered: true,
+    replayed: false,
+    analysisResumed: true,
+  });
+  assert.ok(Object.isFrozen(first));
+  const url = new URL(calls[0].url);
+  assert.equal(
+    `${url.origin}${url.pathname}`,
+    "https://handrail.example/api/mobile-bug-reports/bugs/bug%2F123/information-requests/rfi%201/answer",
+  );
+  assert.equal(url.searchParams.get("project_id"), "project-123");
+  assert.equal(url.searchParams.get("environment"), "staging");
+  assert.equal(calls[0].init.method, "POST");
+  assert.equal(calls[0].init.headers.authorization, "Bearer public-report-token");
+  assert.equal(calls[0].init.headers[APPLICATION_SESSION_TOKEN_HEADER], "answer-session");
+  assert.equal(calls[0].init.headers["content-type"], "application/json");
+  assert.deepEqual(JSON.parse(calls[0].init.body), {
+    option: "From the event's Lineup tab",
+    answer: "I used the Lineup tab on mobile.",
+  });
+
+  const replay = await reporter.answerInformationRequest("bug/123", "rfi 1", { answer: "Written only" });
+  assert.equal(replay.replayed, true);
+  assert.equal(replay.analysisResumed, null);
+  assert.deepEqual(JSON.parse(calls[1].init.body), { answer: "Written only" });
+});
+
+test("information request answers are validated locally and surface Handrail error codes", async () => {
+  let requestCount = 0;
+  let response = jsonResponse({ error: "Already answered", code: "information_request_already_answered" }, 409);
+  const reporter = createBugReporter(reporterConfig({
+    fetch: async () => {
+      requestCount += 1;
+      return response;
+    },
+  }));
+
+  for (const [bugId, requestId, input] of [
+    ["", "rfi-1", { option: "A" }],
+    ["bug-1", " ", { option: "A" }],
+    ["bug-1", "rfi-1", {}],
+    ["bug-1", "rfi-1", { answer: "   " }],
+    ["bug-1", "rfi-1", { option: "" }],
+    ["bug-1", "rfi-1", { answer: "x".repeat(4001) }],
+  ]) {
+    await assert.rejects(
+      reporter.answerInformationRequest(bugId, requestId, input),
+      (error) => error instanceof BugReporterError && error.code === "invalid_report",
+    );
+  }
+  assert.equal(requestCount, 0);
+
+  await assert.rejects(
+    reporter.answerInformationRequest("bug-1", "rfi-1", { option: "A" }),
+    (error) => error instanceof BugReporterError
+      && error.code === "submission_rejected"
+      && error.statusCode === 409
+      && error.upstreamCode === "information_request_already_answered",
+  );
+
+  response = jsonResponse({ contract_version: "v1", bug_id: "other-bug", information_request_id: "rfi-1", answered: true, replayed: false });
+  await assert.rejects(
+    reporter.answerInformationRequest("bug-1", "rfi-1", { option: "A" }),
+    (error) => error instanceof BugReporterError && error.code === "submission_rejected",
+  );
+  assert.equal(requestCount, 2);
+});
+
+test("same-origin reporters answer information requests through the relative forwarding route", async () => {
+  let call;
+  const reporter = createBugReporter({
+    apiBaseUrl: "/api",
+    projectId: "project-123",
+    environment: "staging",
+    transport: "same-origin",
+    fetch: async (url, init) => {
+      call = { url: String(url), init };
+      return jsonResponse({
+        contract_version: "v1",
+        bug_id: "bug-1",
+        information_request_id: "rfi-1",
+        answered: true,
+        replayed: false,
+        analysis_resumed: true,
+      });
+    },
+  });
+
+  await reporter.answerInformationRequest("bug-1", "rfi-1", { option: "A" });
+  assert.equal(
+    call.url,
+    "/api/mobile-bug-reports/bugs/bug-1/information-requests/rfi-1/answer?project_id=project-123&environment=staging",
+  );
+  assert.equal(call.init.credentials, "same-origin");
+  assert.equal(call.init.headers.authorization, undefined);
+  assert.deepEqual(JSON.parse(call.init.body), { option: "A" });
+});

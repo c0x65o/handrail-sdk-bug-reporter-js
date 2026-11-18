@@ -518,3 +518,110 @@ test("same-origin submission falls back to vanilla when request identity disappe
   assert.equal(response.status, 201);
   assert.equal(upstreamBody.automation_requests, undefined);
 });
+
+test("same-origin forwarding scopes information request answers and strips extra keys", async () => {
+  const upstreamRequests = [];
+  let upstreamResponse = () => jsonResponse({
+    contract_version: "v1",
+    bug_id: "bug/1",
+    information_request_id: "rfi/1",
+    answered: true,
+    replayed: false,
+    analysis_resumed: true,
+  });
+  const handler = createSameOriginBugReporterHandler(sharedConfig({
+    resolveApplicationSessionToken: () => "server-answer-session",
+    fetch: async (url, init) => {
+      upstreamRequests.push({ url: String(url), init });
+      return upstreamResponse();
+    },
+  }));
+  const path = "/api/mobile-bug-reports/bugs/bug%2F1/information-requests/rfi%2F1/answer?project_id=attacker&environment=production";
+
+  const response = await handler(new Request(`https://app.example${path}`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      cookie: "app_session=secret-cookie",
+      origin: "https://app.example",
+    },
+    body: JSON.stringify({
+      option: "From the Lineup tab",
+      answer: " I used the Lineup tab. ",
+      project_id: "attacker",
+      report_token: "browser-token",
+      application_session_token: "browser-session",
+      extra: { nested: true },
+    }),
+  }));
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).answered, true);
+  assert.equal(upstreamRequests.length, 1);
+  const upstream = upstreamRequests[0];
+  const url = new URL(upstream.url);
+  assert.equal(url.pathname, "/api/mobile-bug-reports/bugs/bug%2F1/information-requests/rfi%2F1/answer");
+  assert.equal(url.searchParams.get("project_id"), "project-123");
+  assert.equal(url.searchParams.get("environment"), "staging");
+  assert.equal(upstream.init.method, "POST");
+  assert.equal(upstream.init.headers.authorization, "Bearer server-report-secret");
+  assert.equal(upstream.init.headers[APPLICATION_SESSION_TOKEN_HEADER], "server-answer-session");
+  assert.equal(upstream.init.headers.cookie, undefined);
+  assert.deepEqual(JSON.parse(upstream.init.body), {
+    option: "From the Lineup tab",
+    answer: "I used the Lineup tab.",
+  });
+
+  // Only POST is forwarded for the answer route.
+  for (const method of ["GET", "PUT", "DELETE"]) {
+    const rejected = await handler(new Request(`https://app.example${path}`, { method }));
+    assert.equal(rejected.status, 405, method);
+  }
+  assert.equal(upstreamRequests.length, 1);
+
+  // An answer without option or answer is rejected before forwarding.
+  const empty = await handler(new Request(`https://app.example${path}`, {
+    method: "POST",
+    body: JSON.stringify({ extra: "only" }),
+  }));
+  assert.equal(empty.status, 400);
+  assert.equal((await empty.json()).code, "information_request_answer_invalid");
+  assert.equal(upstreamRequests.length, 1);
+
+  // Cross-site answers are rejected before forwarding.
+  const crossSite = await handler(new Request(`https://app.example${path}`, {
+    method: "POST",
+    headers: { origin: "https://attacker.example" },
+    body: JSON.stringify({ option: "A" }),
+  }));
+  assert.equal(crossSite.status, 403);
+  assert.equal(upstreamRequests.length, 1);
+
+  // Handrail's stable error code survives forwarding; other upstream text does not.
+  upstreamResponse = () => jsonResponse({
+    error: "Question already answered by server-report-secret",
+    code: "information_request_already_answered",
+  }, 409);
+  const conflict = await handler(new Request(`https://app.example${path}`, {
+    method: "POST",
+    body: JSON.stringify({ option: "A" }),
+  }));
+  assert.equal(conflict.status, 409);
+  const conflictBody = await conflict.json();
+  assert.deepEqual(conflictBody, {
+    error: "bug_reporting_rejected",
+    code: "information_request_already_answered",
+  });
+
+  const browser = createBrowserBugReporter({
+    apiBaseUrl: "/api",
+    projectId: "project-123",
+    environment: "staging",
+    transport: "same-origin",
+    fetch: async (url, init) => handler(new Request(`https://app.example${url}`, init)),
+  });
+  await assert.rejects(
+    browser.answerInformationRequest("bug/1", "rfi/1", { option: "A" }),
+    (error) => error.statusCode === 409
+      && error.upstreamCode === "information_request_already_answered",
+  );
+});

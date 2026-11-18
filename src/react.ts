@@ -25,6 +25,8 @@ import {
   type AutomationOptionKey,
   type BugArchiveClosedResult,
   type BugArchiveResult,
+  type BugInformationRequestAnswerInput,
+  type BugInformationRequestAnswerResult,
   type BugReportInput,
   type BugReporterConfig,
   type BugReporterPolicy,
@@ -67,6 +69,7 @@ export {
   HandrailBugReporterClient,
   MAX_SCREENSHOT_BYTES,
   MAX_BUG_HISTORY_SEARCH_CHARACTERS,
+  MAX_INFORMATION_REQUEST_ANSWER_CHARACTERS,
   REDACTED_VALUE,
   normalizeBugReporterEndpoints,
   redactSensitiveValues,
@@ -76,6 +79,9 @@ export type {
   AutomationOptionKey,
   BugArchiveClosedResult,
   BugArchiveResult,
+  BugInformationRequest,
+  BugInformationRequestAnswerInput,
+  BugInformationRequestAnswerResult,
   BugReportInput,
   BugReporterConfig,
   BugReporterConfigurationSnapshot,
@@ -232,6 +238,16 @@ export interface HandrailBugReporterContextValue {
   archiveBug(bugId: string): Promise<BugArchiveResult>;
   restoreBug(bugId: string): Promise<BugArchiveResult>;
   archiveClosedBugs(): Promise<BugArchiveClosedResult>;
+  /**
+   * Answer the open question on one of the reporter's bugs, then revalidate the
+   * current history query in the background. Refresh failure stays separate
+   * from answer success and is exposed through tracking state.
+   */
+  answerInformationRequest(
+    bugId: string,
+    requestId: string,
+    input: BugInformationRequestAnswerInput,
+  ): Promise<BugInformationRequestAnswerResult>;
 }
 
 export interface HandrailBugReporterProviderProps extends PropsWithChildren {
@@ -598,16 +614,21 @@ function BugReporterSessionProvider({
     }
   }, [applyPolicy, historyPageSize, reporter, tracking.hasMore, tracking.nextCursor, tracking.status, tracking.query]);
 
-  const refreshCurrentBugs = useCallback(async () => {
+  const currentTrackingQuery = useMemo((): BugReporterTrackingQueryOptions => {
     const query = tracking.query;
-    return refreshBugs(query ? {
+    return query ? {
       audience: query.audience,
       search: query.search || undefined,
       statusGroup: query.statusGroup || undefined,
       sort: query.sort,
       visibility: query.visibility,
-    } : {});
-  }, [refreshBugs, tracking.query]);
+    } : {};
+  }, [tracking.query]);
+
+  const refreshCurrentBugs = useCallback(
+    async () => refreshBugs(currentTrackingQuery),
+    [currentTrackingQuery, refreshBugs],
+  );
 
   const archiveBug = useCallback(async (bugId: string) => {
     const result = await reporter.archiveBug(bugId);
@@ -642,6 +663,21 @@ function BugReporterSessionProvider({
     return result;
   }, [refreshCurrentBugs, reporter]);
 
+  const answerInformationRequest = useCallback(async (
+    bugId: string,
+    requestId: string,
+    input: BugInformationRequestAnswerInput,
+  ) => {
+    const result = await reporter.answerInformationRequest(bugId, requestId, input);
+    setTracking((current) => ({ ...current, stale: true }));
+    try {
+      await refreshBugs(currentTrackingQuery, true);
+    } catch {
+      // The answer was saved. The tracking state separately exposes refresh failure.
+    }
+    return result;
+  }, [currentTrackingQuery, refreshBugs, reporter]);
+
   const value = useMemo<HandrailBugReporterContextValue>(
     () => ({
       reporter,
@@ -667,9 +703,11 @@ function BugReporterSessionProvider({
       archiveBug,
       restoreBug,
       archiveClosedBugs,
+      answerInformationRequest,
     }),
     [
       form,
+      answerInformationRequest,
       archiveBug,
       archiveClosedBugs,
       policy,

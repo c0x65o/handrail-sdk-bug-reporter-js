@@ -52,6 +52,7 @@ export {
   HandrailBugReporterClient,
   MAX_SCREENSHOT_BYTES,
   MAX_BUG_HISTORY_SEARCH_CHARACTERS,
+  MAX_INFORMATION_REQUEST_ANSWER_CHARACTERS,
   REDACTED_VALUE,
   normalizeBugReporterEndpoints,
   redactSensitiveValues,
@@ -61,6 +62,9 @@ export type {
   AutomationOptionKey,
   BugArchiveClosedResult,
   BugArchiveResult,
+  BugInformationRequest,
+  BugInformationRequestAnswerInput,
+  BugInformationRequestAnswerResult,
   BugReportInput,
   BugReporterConfig,
   BugReporterConfigurationSnapshot,
@@ -189,8 +193,8 @@ function clean(value: unknown): string | null {
   return value.trim() || null;
 }
 
-function forwardingJson(status: number, code: string): Response {
-  return new Response(JSON.stringify({ error: code }), {
+function forwardingJson(status: number, error: string, code?: string | null): Response {
+  return new Response(JSON.stringify({ error, ...(code ? { code } : {}) }), {
     status,
     headers: {
       "cache-control": "private, no-store",
@@ -329,6 +333,43 @@ function normalizeForwardedPayload(
   return JSON.stringify(body);
 }
 
+/** Forward only the answer fields; Handrail validates the option and length. */
+function normalizeForwardedInformationAnswer(input: unknown): string | null {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return null;
+  const source = input as Record<string, unknown>;
+  const option = clean(source.option);
+  const answer = clean(source.answer);
+  if (!option && !answer) return null;
+  return JSON.stringify({
+    ...(option ? { option } : {}),
+    ...(answer ? { answer } : {}),
+  });
+}
+
+/** Preserve Handrail's stable answer error code without forwarding other upstream text. */
+async function forwardedInformationAnswerError(upstream: Response): Promise<Response> {
+  let code: string | null = null;
+  try {
+    const text = await upstream.text();
+    if (text.length <= 16_384) {
+      const parsed: unknown = JSON.parse(text);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        const body = parsed as Record<string, unknown>;
+        const nested = body.error && typeof body.error === "object" && !Array.isArray(body.error)
+          ? (body.error as Record<string, unknown>).code
+          : undefined;
+        const candidate = clean(nested ?? body.code);
+        code = candidate && candidate.length <= 120 && /^[A-Za-z0-9][A-Za-z0-9._:-]*$/u.test(candidate)
+          ? candidate
+          : null;
+      }
+    }
+  } catch {
+    code = null;
+  }
+  return forwardingJson(upstream.status, "bug_reporting_rejected", code);
+}
+
 function normalizeForwardedSubscription(input: unknown): string | null {
   if (!input || typeof input !== "object" || Array.isArray(input)) return null;
   const source = input as Record<string, unknown>;
@@ -349,7 +390,8 @@ function normalizeForwardedSubscription(input: unknown): string | null {
 /**
  * Create a Web Request/Response handler that applications can mount on the
  * same origin at `/api/mobile-bug-reports`, including `/policy`, `/mine`, and
- * principal-scoped `/bugs/:bugId` child routes.
+ * principal-scoped `/bugs/:bugId` child routes (including
+ * `POST /bugs/:bugId/information-requests/:requestId/answer`).
  * Incoming cookies and authentication headers are consumed only by the
  * application's resolver and are never forwarded to Handrail.
  */
@@ -434,6 +476,12 @@ export function createSameOriginBugReporterHandler<
       && pathParts.length === 3
       && pathParts[0] === "bugs"
       && pathParts[2] === "subscription";
+    const isInformationAnswer = request.method === "POST"
+      && pathParts.length === 5
+      && pathParts[0] === "bugs"
+      && pathParts[2] === "information-requests"
+      && pathParts[4] === "answer";
+    const sendsBody = isSubmission || isSubscription || isInformationAnswer;
     if (
       !isPolicy
       && !isHistory
@@ -441,6 +489,7 @@ export function createSameOriginBugReporterHandler<
       && !isArchive
       && !isArchiveClosed
       && !isSubscription
+      && !isInformationAnswer
       && !isSubmission
     ) {
       return new Response(null, {
@@ -451,7 +500,7 @@ export function createSameOriginBugReporterHandler<
 
     let body: string | undefined;
     let vanillaBody: string | undefined;
-    if (isSubmission || isSubscription) {
+    if (sendsBody) {
       const declaredLength = Number(request.headers.get("content-length"));
       if (Number.isFinite(declaredLength) && declaredLength > MAX_FORWARD_BODY_BYTES) {
         return forwardingJson(413, "report_too_large");
@@ -469,11 +518,19 @@ export function createSameOriginBugReporterHandler<
         const parsed = JSON.parse(text);
         body = (isSubscription
           ? normalizeForwardedSubscription(parsed)
-          : normalizeForwardedPayload(parsed, projectId!, environment!)) || undefined;
+          : isInformationAnswer
+            ? normalizeForwardedInformationAnswer(parsed)
+            : normalizeForwardedPayload(parsed, projectId!, environment!)) || undefined;
       } catch {
         body = undefined;
       }
-      if (!body) return forwardingJson(400, "invalid_report");
+      if (!body) {
+        return forwardingJson(
+          400,
+          "invalid_report",
+          isInformationAnswer ? "information_request_answer_invalid" : null,
+        );
+      }
       if (isSubmission) {
         const vanillaPayload = JSON.parse(body) as Record<string, unknown>;
         delete vanillaPayload.automation_requests;
@@ -486,21 +543,42 @@ export function createSameOriginBugReporterHandler<
     let endpoint: URL;
     if (isPolicy) endpoint = new URL(endpoints!.policy);
     else if (isHistory) endpoint = new URL(endpoints!.history);
-    else if (isLookup || isArchive || isSubscription) {
+    else if (isLookup || isArchive || isSubscription || isInformationAnswer) {
       let bugId: string;
+      let requestId = "";
       try {
         bugId = decodeURIComponent(pathParts[1]).trim();
+        if (isInformationAnswer) requestId = decodeURIComponent(pathParts[3]).trim();
       } catch {
         bugId = "";
       }
       if (!bugId) return forwardingJson(404, "bug_history_not_found");
+      if (isInformationAnswer && !requestId) {
+        return forwardingJson(404, "information_request_not_found");
+      }
       endpoint = new URL(
-        `${endpoints!.bugs}/${encodeURIComponent(bugId)}${isArchive ? "/archive" : isSubscription ? "/subscription" : ""}`,
+        `${endpoints!.bugs}/${encodeURIComponent(bugId)}${
+          isArchive
+            ? "/archive"
+            : isSubscription
+              ? "/subscription"
+              : isInformationAnswer
+                ? `/information-requests/${encodeURIComponent(requestId)}/answer`
+                : ""
+        }`,
       );
     } else if (isArchiveClosed) {
       endpoint = new URL(`${endpoints!.history}/archive-closed`);
     } else endpoint = new URL(endpoints!.reports);
-    if (isPolicy || isHistory || isLookup || isArchive || isArchiveClosed || isSubscription) {
+    if (
+      isPolicy
+      || isHistory
+      || isLookup
+      || isArchive
+      || isArchiveClosed
+      || isSubscription
+      || isInformationAnswer
+    ) {
       endpoint.searchParams.set("project_id", projectId!);
       endpoint.searchParams.set("environment", environment!);
     }
@@ -533,7 +611,7 @@ export function createSameOriginBugReporterHandler<
         applicationSessionToken = null;
       }
       const headers: Record<string, string> = { accept: "application/json" };
-      if (isSubmission || isSubscription) headers["content-type"] = "application/json";
+      if (sendsBody) headers["content-type"] = "application/json";
       if (reportTokenHeader === BUG_REPORT_TOKEN_HEADER) {
         headers[BUG_REPORT_TOKEN_HEADER] = reportToken!;
       } else {
@@ -545,13 +623,13 @@ export function createSameOriginBugReporterHandler<
       applicationSessionForwarded = Boolean(applicationSessionToken);
       try {
         upstream = await fetchImpl(endpoint, {
-          method: isSubmission || isSubscription
+          method: sendsBody
             ? "POST"
             : isArchive || isArchiveClosed
               ? request.method
               : "GET",
           headers,
-          body: isSubmission || isSubscription
+          body: sendsBody
             ? applicationSessionToken
               ? body
               : vanillaBody
@@ -596,6 +674,7 @@ export function createSameOriginBugReporterHandler<
           attempts,
         });
       }
+      if (isInformationAnswer) return forwardedInformationAnswerError(upstream);
       return forwardingJson(upstream.status, "bug_reporting_rejected");
     }
     let responseBody: string;

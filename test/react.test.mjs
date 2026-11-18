@@ -494,3 +494,84 @@ test('sessionKey cancels inflight history and clears policy/results on account s
   assert.deepEqual(value.tracking.bugs, []);
   await act(async () => renderer.unmount());
 });
+
+test("headless React answers an information request and revalidates history in the background", async () => {
+  const requests = [];
+  let answered = false;
+  let failRefresh = false;
+  const question = {
+    id: "rfi-1",
+    current_behavior: "Artists can be assigned from the Lineup tab.",
+    question: "Where did you try to assign the artist?",
+    options: ["Lineup tab", "Artist profile"],
+    allows_written_answer: true,
+    asked_at: "2026-11-18T15:00:00.000Z",
+    response_allowed: true,
+  };
+  const config = {
+    apiBaseUrl: "https://handrail.example/api",
+    projectId: "project-123",
+    environment: "staging",
+    reportToken: "public-token",
+    applicationSessionTokenProvider: () => "history-session",
+    fetch: async (url, init) => {
+      requests.push({ url: String(url), method: init.method, body: init.body });
+      if (init.method === "POST") {
+        answered = true;
+        return jsonResponse({
+          contract_version: "v1",
+          bug_id: "bug-1",
+          information_request_id: "rfi-1",
+          answered: true,
+          replayed: false,
+          analysis_resumed: true,
+        });
+      }
+      if (failRefresh) return jsonResponse({ error: "unavailable" }, 503);
+      return jsonResponse({
+        contract_version: "v1",
+        bugs: [{ ...trackedBug("bug-1"), information_request: answered ? null : question }],
+        summary: { total: 1, needs_attention: 0, in_progress: 1, closed: 0, not_reproduced: 0 },
+        query: { search: "artist", status_group: null, sort: "oldest", visibility: "active" },
+        pagination: { limit: 20, filtered_count: 1, has_more: false, next_cursor: null },
+      });
+    },
+  };
+  let value;
+  let renderer;
+  await act(async () => {
+    renderer = create(createElement(Harness, {
+      config,
+      loadPolicyOnMount: false,
+      onValue: (next) => {
+        value = next;
+      },
+    }));
+  });
+  await act(async () => value.refreshBugs({ search: "artist", sort: "oldest" }));
+  assert.equal(value.tracking.bugs[0].information_request.id, "rfi-1");
+
+  let result;
+  await act(async () => {
+    result = await value.answerInformationRequest("bug-1", "rfi-1", { option: "Lineup tab" });
+  });
+  assert.equal(result.analysisResumed, true);
+  assert.deepEqual(requests.map((request) => request.method), ["GET", "POST", "GET"]);
+  assert.match(requests[1].url, /\/bugs\/bug-1\/information-requests\/rfi-1\/answer\?/);
+  assert.deepEqual(JSON.parse(requests[1].body), { option: "Lineup tab" });
+  assert.match(requests[2].url, /search=artist/);
+  assert.match(requests[2].url, /sort=oldest/);
+  assert.equal(value.tracking.status, "ready");
+  assert.equal(value.tracking.bugs[0].information_request, null);
+
+  // A saved answer is still reported as success when the follow-up refresh fails.
+  answered = false;
+  failRefresh = true;
+  await act(async () => {
+    result = await value.answerInformationRequest("bug-1", "rfi-1", { answer: "Lineup tab on mobile" });
+  });
+  assert.equal(result.answered, true);
+  assert.equal(value.tracking.status, "error");
+  assert.equal(value.tracking.stale, true);
+  await act(async () => renderer.unmount());
+});

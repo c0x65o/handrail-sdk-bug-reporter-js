@@ -17,7 +17,10 @@ import {
   type BugReporterTrackingQueryOptions,
 } from "./react";
 import {
+  BugReporterError,
+  MAX_INFORMATION_REQUEST_ANSWER_CHARACTERS,
   MAX_SCREENSHOT_BYTES,
+  type BugInformationRequest,
   type BugResolutionJourney,
   type BugResolutionMilestone,
   type BugTrackingStatusGroup,
@@ -1001,7 +1004,7 @@ function BugResolutionReceipt({ bug }: { readonly bug: TrackedBugRecord }): Reac
     <div>
       <div style={{ color: "var(--handrail-bug-muted-text)", fontSize: 10, fontWeight: 900, letterSpacing: ".08em", textTransform: "uppercase" }}>How Handrail handled it</div>
       <h4 style={{ margin: "5px 0 7px", fontSize: 17 }}>{journey.headline}</h4>
-      {journey.next_step && <div data-handrail-bug-next-step="true" style={{ margin: "0 0 9px", padding: "9px 10px", border: "1px solid var(--handrail-bug-warning-text)", borderRadius: 8, background: "var(--handrail-bug-warning-surface)", color: "var(--handrail-bug-warning-text)", fontSize: 11, lineHeight: 1.45 }}>
+      {journey.next_step && !bug.information_request && <div data-handrail-bug-next-step="true" style={{ margin: "0 0 9px", padding: "9px 10px", border: "1px solid var(--handrail-bug-warning-text)", borderRadius: 8, background: "var(--handrail-bug-warning-surface)", color: "var(--handrail-bug-warning-text)", fontSize: 11, lineHeight: 1.45 }}>
         <strong style={{ display: "block", marginBottom: 2 }}>Next step: {journey.next_step.label}</strong>
         <span>{journey.next_step.summary}</span>
       </div>}
@@ -1019,6 +1022,148 @@ function BugResolutionReceipt({ bug }: { readonly bug: TrackedBugRecord }): Reac
   </section>;
 }
 
+interface InformationAnswerDraft {
+  readonly option: string | null;
+  readonly answer: string;
+}
+
+const EMPTY_INFORMATION_ANSWER_DRAFT: InformationAnswerDraft = Object.freeze({
+  option: null,
+  answer: "",
+});
+
+function informationAnswerDraftHasInput(draft: InformationAnswerDraft | undefined): boolean {
+  return Boolean(draft && (draft.option || draft.answer.trim()));
+}
+
+/** Map Handrail's structured answer error codes to reporter-facing copy. */
+function informationAnswerFailure(error: unknown): {
+  readonly message: string;
+  readonly questionGone: boolean;
+} {
+  if (error instanceof BugReporterError) {
+    switch (error.upstreamCode) {
+      case "information_request_already_answered":
+        return { message: "This question was already answered.", questionGone: true };
+      case "information_request_closed":
+        return { message: "This question is no longer open.", questionGone: true };
+      case "information_request_not_found":
+      case "bug_history_not_found":
+        return { message: "This question is no longer available.", questionGone: true };
+      case "information_request_answer_invalid":
+        return {
+          message: "Choose one of the answers or write your own, up to 4,000 characters.",
+          questionGone: false,
+        };
+      default:
+        break;
+    }
+    if (error.code === "invalid_report") return { message: error.message, questionGone: false };
+    if (error.statusCode === 404 || error.statusCode === 409) {
+      return { message: "This question is no longer open.", questionGone: true };
+    }
+  }
+  return { message: "Your answer could not be sent. Please try again.", questionGone: false };
+}
+
+function BugInformationRequestCard({
+  request,
+  draft,
+  busy,
+  error,
+  onChange,
+  onSubmit,
+}: {
+  readonly request: BugInformationRequest;
+  readonly draft: InformationAnswerDraft;
+  readonly busy: boolean;
+  readonly error: string | null;
+  readonly onChange: (draft: InformationAnswerDraft) => void;
+  readonly onSubmit: () => void;
+}): ReactElement {
+  const headingId = useId();
+  const selectedOption = draft.option && request.options.includes(draft.option)
+    ? draft.option
+    : null;
+  const canSend = !busy && Boolean(
+    selectedOption || (request.allows_written_answer && draft.answer.trim()),
+  );
+  return <form
+    aria-labelledby={headingId}
+    data-handrail-bug-information-request="true"
+    onSubmit={(event) => {
+      event.preventDefault();
+      if (canSend) onSubmit();
+    }}
+    style={{ display: "grid", gap: 10, minWidth: 0, margin: 0, padding: 14, border: "1px solid color-mix(in srgb, var(--handrail-bug-warning-text) 38%, var(--handrail-bug-border))", borderRadius: 11, background: "linear-gradient(135deg, color-mix(in srgb, var(--handrail-bug-warning-text) 6%, var(--handrail-bug-surface)), var(--handrail-bug-surface))" }}
+  >
+    <div style={{ display: "flex", flexWrap: "wrap", alignItems: "baseline", justifyContent: "space-between", gap: "4px 12px" }}>
+      <span style={{ color: "var(--handrail-bug-warning-text)", fontSize: 10, fontWeight: 900, letterSpacing: ".08em", textTransform: "uppercase" }}>Needs your input</span>
+      {request.asked_at && <span style={{ color: "var(--handrail-bug-muted-text)", fontSize: 10 }}>Asked {bugDate(request.asked_at)}</span>}
+    </div>
+    {request.current_behavior && <div data-handrail-bug-information-current-behavior="true" style={{ padding: "9px 10px", border: "1px solid var(--handrail-bug-border)", borderRadius: 8, background: "var(--handrail-bug-surface-muted)", fontSize: 12, lineHeight: 1.45 }}>
+      <strong style={{ display: "block", marginBottom: 3, color: "var(--handrail-bug-muted-text)", fontSize: 10, fontWeight: 800, letterSpacing: ".06em", textTransform: "uppercase" }}>What it does today</strong>
+      <span style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{request.current_behavior}</span>
+    </div>}
+    <h4 id={headingId} style={{ margin: 0, fontSize: 15, lineHeight: 1.35, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{request.question}</h4>
+    {request.options.length > 0 && <div role="group" aria-label="Suggested answers" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 220px), 1fr))", gap: 6 }}>
+      {request.options.map((option, index) => {
+        const letter = String.fromCharCode(65 + index);
+        const selected = selectedOption === option;
+        return <button
+          key={option}
+          type="button"
+          aria-pressed={selected}
+          aria-label={`${letter}. ${option}`}
+          data-handrail-bug-information-option={letter}
+          disabled={busy}
+          onClick={() => onChange({ ...draft, option: selected ? null : option })}
+          style={{
+            ...buttonStyle("secondary"),
+            display: "flex",
+            alignItems: "flex-start",
+            gap: 10,
+            width: "100%",
+            boxSizing: "border-box",
+            padding: "8px 10px",
+            textAlign: "start",
+            fontWeight: 600,
+            lineHeight: 1.45,
+            cursor: busy ? "wait" : "pointer",
+            opacity: busy ? 0.65 : 1,
+            ...(selected ? styles.selectedControl : {}),
+          }}
+        >
+          <span aria-hidden="true" style={{ flex: "0 0 22px", height: 22, boxSizing: "border-box", border: "1px solid", borderRadius: 6, lineHeight: "20px", textAlign: "center", fontSize: 11, fontWeight: 800, ...(selected ? { borderColor: "var(--handrail-bug-accent)", color: "var(--handrail-bug-accent-text)", background: "var(--handrail-bug-accent)" } : { borderColor: "var(--handrail-bug-border)", color: "var(--handrail-bug-muted-text)", background: "var(--handrail-bug-surface-muted)" }) }}>{letter}</span>
+          <span style={{ flex: 1, minWidth: 0, paddingTop: 1, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{option}</span>
+        </button>;
+      })}
+    </div>}
+    {request.allows_written_answer && <label style={{ ...styles.label, marginBottom: 0 }}>
+      {request.options.length > 0 ? "Or write your own answer" : "Your answer"}
+      <textarea
+        data-handrail-bug-information-answer="true"
+        maxLength={MAX_INFORMATION_REQUEST_ANSWER_CHARACTERS}
+        rows={2}
+        disabled={busy}
+        value={draft.answer}
+        onChange={(event) => onChange({ ...draft, answer: event.target.value })}
+        placeholder="Describe what you expected or what you see."
+        style={{ ...styles.input, minHeight: 64, resize: "vertical" }}
+      />
+    </label>}
+    {error && <div role="alert" style={{ ...styles.status, marginBottom: 0, background: "var(--handrail-bug-danger-surface)", color: "var(--handrail-bug-danger-text)" }}>{error}</div>}
+    <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+      <span style={{ flex: "1 1 200px", minWidth: 0, color: "var(--handrail-bug-muted-text)", fontSize: 11 }}>Handrail reviews this report again with your answer.</span>
+      <button
+        type="submit"
+        disabled={!canSend}
+        style={{ ...buttonStyle("primary"), opacity: canSend ? 1 : 0.55, cursor: busy ? "wait" : canSend ? "pointer" : "not-allowed" }}
+      >{busy ? "Sending…" : "Send answer"}</button>
+    </div>
+  </form>;
+}
+
 function BugHistoryRow({
   bug,
   busy,
@@ -1026,6 +1171,11 @@ function BugHistoryRow({
   onToggle,
   onArchive,
   onRestore,
+  answerDraft,
+  answering,
+  answerError,
+  onAnswerDraftChange,
+  onAnswerSubmit,
 }: {
   readonly bug: TrackedBugRecord;
   readonly busy: boolean;
@@ -1033,7 +1183,13 @@ function BugHistoryRow({
   readonly onToggle: (bugId: string) => void;
   readonly onArchive: (bugId: string) => Promise<void>;
   readonly onRestore: (bugId: string) => Promise<void>;
+  readonly answerDraft: InformationAnswerDraft;
+  readonly answering: boolean;
+  readonly answerError: string | null;
+  readonly onAnswerDraftChange: (requestId: string, draft: InformationAnswerDraft) => void;
+  readonly onAnswerSubmit: (bug: TrackedBugRecord, request: BugInformationRequest) => void;
 }): ReactElement {
+  const informationRequest = bug.is_owner !== false ? bug.information_request || null : null;
   const group = bugStatusGroup(bug);
   const statusTimestamp = bug.status_rollup.updated_at || bug.updated_at;
   const journey = journeyForBug(bug);
@@ -1075,6 +1231,17 @@ function BugHistoryRow({
         {busy ? "Updating…" : bug.archived ? "Restore" : "Archive"}
       </button>}
     </div>
+    {informationRequest && <div role="cell" data-handrail-bug-information-request-cell="true" style={{ gridColumn: "1 / -1", minWidth: 0 }}>
+      <BugInformationRequestCard
+        key={informationRequest.id}
+        request={informationRequest}
+        draft={answerDraft}
+        busy={answering}
+        error={answerError}
+        onChange={(draft) => onAnswerDraftChange(informationRequest.id, draft)}
+        onSubmit={() => onAnswerSubmit(bug, informationRequest)}
+      />
+    </div>}
     {expanded && <div role="cell" data-handrail-bug-history-detail="true" style={{ display: "contents" }}><BugResolutionReceipt bug={bug} /></div>}
   </article>;
 }
@@ -1097,11 +1264,23 @@ function BugHistory(): ReactElement {
   const [busyBugId, setBusyBugId] = useState<string | null>(null);
   const [expandedBugId, setExpandedBugId] = useState<string | null>(null);
   const [historyActionError, setHistoryActionError] = useState<string | null>(null);
+  const [historyNotice, setHistoryNotice] = useState<string | null>(null);
+  // Answer drafts live here, keyed by information request id, so a history
+  // refresh that replaces row objects never clears a half-written answer.
+  const [answerDrafts, setAnswerDrafts] = useState<Readonly<Record<string, InformationAnswerDraft>>>({});
+  const [answerErrors, setAnswerErrors] = useState<Readonly<Record<string, string>>>({});
+  const [answeringRequestId, setAnsweringRequestId] = useState<string | null>(null);
   const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const trackingStatusRef = useRef(reporter.tracking.status);
   trackingStatusRef.current = reporter.tracking.status;
   const readingHistoryRef = useRef(false);
   readingHistoryRef.current = expandedBugId !== null;
+  const answeringHistoryRef = useRef(false);
+  answeringHistoryRef.current = answeringRequestId !== null
+    || reporter.tracking.bugs.some((bug) => {
+      const request = bug.information_request;
+      return Boolean(request && informationAnswerDraftHasInput(answerDrafts[request.id]));
+    });
 
   useEffect(() => () => {
     if (searchTimerRef.current !== null) clearTimeout(searchTimerRef.current);
@@ -1122,6 +1301,7 @@ function BugHistory(): ReactElement {
     overrides: Partial<BugReporterTrackingQueryOptions> = {},
   ) => {
     setHistoryActionError(null);
+    setHistoryNotice(null);
     try {
       await reporter.refreshBugs(query(overrides));
     } catch (error) {
@@ -1139,7 +1319,11 @@ function BugHistory(): ReactElement {
       sort,
     };
     const interval = setInterval(() => {
-      if (trackingStatusRef.current === "loading" || readingHistoryRef.current) return;
+      if (
+        trackingStatusRef.current === "loading"
+        || readingHistoryRef.current
+        || answeringHistoryRef.current
+      ) return;
       setHistoryActionError(null);
       void refreshBugs(currentQuery, true).catch((error) => {
         setHistoryActionError(
@@ -1160,6 +1344,60 @@ function BugHistory(): ReactElement {
       setHistoryActionError(error instanceof Error ? error.message : "Bug history could not be updated.");
     } finally {
       setBusyBugId(null);
+    }
+  };
+
+  const changeAnswerDraft = (requestId: string, draft: InformationAnswerDraft) => {
+    setAnswerDrafts((current) => ({ ...current, [requestId]: draft }));
+    setAnswerErrors((current) => {
+      if (!current[requestId]) return current;
+      const { [requestId]: _cleared, ...rest } = current;
+      return rest;
+    });
+  };
+
+  const forgetAnswerDraft = (requestId: string) => {
+    setAnswerDrafts((current) => {
+      const { [requestId]: _sent, ...rest } = current;
+      return rest;
+    });
+  };
+
+  const sendAnswer = async (bug: TrackedBugRecord, request: BugInformationRequest) => {
+    if (answeringRequestId !== null) return;
+    const draft = answerDrafts[request.id] || EMPTY_INFORMATION_ANSWER_DRAFT;
+    const option = draft.option && request.options.includes(draft.option)
+      ? draft.option
+      : undefined;
+    const answer = request.allows_written_answer ? draft.answer.trim() || undefined : undefined;
+    if (!option && !answer) return;
+    setAnsweringRequestId(request.id);
+    setHistoryActionError(null);
+    setHistoryNotice(null);
+    setAnswerErrors((current) => {
+      const { [request.id]: _cleared, ...rest } = current;
+      return rest;
+    });
+    try {
+      const result = await reporter.answerInformationRequest(bug.id, request.id, {
+        ...(option ? { option } : {}),
+        ...(answer ? { answer } : {}),
+      });
+      forgetAnswerDraft(request.id);
+      setHistoryNotice(result.analysisResumed === true
+        ? "Thanks. Your answer was sent and Handrail is reviewing the report again."
+        : "Thanks. Your answer was sent.");
+    } catch (error) {
+      const failure = informationAnswerFailure(error);
+      if (failure.questionGone) {
+        forgetAnswerDraft(request.id);
+        setHistoryActionError(failure.message);
+        void reporter.refreshBugs(query(), true).catch(() => undefined);
+      } else {
+        setAnswerErrors((current) => ({ ...current, [request.id]: failure.message }));
+      }
+    } finally {
+      setAnsweringRequestId(null);
     }
   };
 
@@ -1280,6 +1518,7 @@ function BugHistory(): ReactElement {
     </form>
 
     {historyActionError && <div role="alert" style={{ ...styles.status, background: "var(--handrail-bug-danger-surface)", color: "var(--handrail-bug-danger-text)" }}>{historyActionError}</div>}
+    {historyNotice && <div role="status" aria-live="polite" style={{ ...styles.status, background: "var(--handrail-bug-success-surface)", color: "var(--handrail-bug-success-text)" }}>{historyNotice}</div>}
     {reporter.tracking.status === "loading" && reporter.tracking.bugs.length === 0 && <div role="status" style={{ ...styles.status, background: "var(--handrail-bug-surface-muted)", color: "var(--handrail-bug-muted-text)" }}>Loading your bugs…</div>}
     {reporter.tracking.status === "error" && !historyActionError && <div role="alert" style={{ ...styles.status, background: "var(--handrail-bug-danger-surface)", color: "var(--handrail-bug-danger-text)" }}>{reporter.tracking.error?.message || "Bug history could not be loaded."}</div>}
     {showHistoryResults && <div role="table" aria-label="Reported bugs" data-handrail-bug-history-list="true" style={{ ...styles.historyList, flex: "1 1 auto", opacity: reporter.tracking.status === "loading" ? 0.68 : 1 }}>
@@ -1298,6 +1537,11 @@ function BugHistory(): ReactElement {
             onToggle={(bugId) => setExpandedBugId((current) => current === bugId ? null : bugId)}
             onArchive={(bugId) => changeArchive(bugId, true)}
             onRestore={(bugId) => changeArchive(bugId, false)}
+            answerDraft={(bug.information_request && answerDrafts[bug.information_request.id]) || EMPTY_INFORMATION_ANSWER_DRAFT}
+            answering={Boolean(bug.information_request && answeringRequestId === bug.information_request.id)}
+            answerError={(bug.information_request && answerErrors[bug.information_request.id]) || null}
+            onAnswerDraftChange={changeAnswerDraft}
+            onAnswerSubmit={(answeredBug, request) => void sendAnswer(answeredBug, request)}
           />)}
       {reporter.tracking.hasMore && <div style={{ display: "grid", placeItems: "center", padding: 10, borderBottom: "1px solid var(--handrail-bug-border)" }}>
         <button type="button" disabled={reporter.tracking.status === "loading"} onClick={() => void loadMore()} style={buttonStyle("secondary")}>
